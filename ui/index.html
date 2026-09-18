@@ -711,33 +711,61 @@
         window.addEventListener("beforeunload", () => off && off());
       }
 
+      // Technical identifier columns are meaningless in user-facing question
+      // suggestions — exclude them when picking columns to reference.
+      const isTechColumn = (name) => /^(id|uid|uuid|guid)$/i.test(name)
+        || /(^|_)(id|no|num|code|key|uuid|guid)$/i.test(name)
+        || /^(parent|father|mother|fk|ref)[-_]/i.test(name)
+        || /^(parent|father|mother)[-_]?id$/i.test(name);
+
       function renderAiQuestions(r) {
         const box = $("ai-questions");
         box.innerHTML = "";
-        const tables = r.tables || [];
+        const tables = (r.tables || []).filter(Boolean);
         const t = tables[0] || "这张表";
-        // Dynamic: derive from the confirmed sheet's column profiles so the
-        // suggestions reference real column names, not placeholders.
-        const sh = state.sheets[0] || {};
-        const prof = sh.columnProfiles || [];
+        // Dynamic: derive from the confirmed sheets' column profiles so the
+        // suggestions reference real, human-meaningful column names.
+        const sheets = (state.sheets || []).filter(
+          (_, i) => (state.plans[i] || {}).enabled !== false
+        );
+        const sh = sheets[0] || {};
+        const prof = (sh.columnProfiles || []).filter((c) => !isTechColumn(c.name));
         const colNames = sh.headers || prof.map((c) => c.name);
         const types = sh.inferredTypes || [];
-        const dateIdx = types.indexOf("DATE");
-        const dateCol = dateIdx >= 0 ? colNames[dateIdx] : "日期";
-        const numIdx = types.findIndex((x) => x === "REAL" || x === "INTEGER");
-        const numCol = numIdx >= 0 ? colNames[numIdx] : null;
-        const catIdx = (name) => colNames.indexOf(name);
+        const typeOf = (name) => {
+          const i = colNames.indexOf(name);
+          return i >= 0 ? types[i] : null;
+        };
+        const dateCol = prof.length
+          ? (colNames.find((n) => typeOf(n) === "DATE" && !isTechColumn(n)) || null)
+          : null;
+        const numCol = prof.length
+          ? (prof.find((c) => {
+              const ty = typeOf(c.name);
+              return (ty === "REAL" || ty === "INTEGER") && c.distinct > 5;
+            }) || {}).name || null
+          : null;
         const catCol = prof.find((c) => {
-          const i = catIdx(c.name);
-          return c.distinct >= 2 && c.distinct <= 30 && c.nullRatio < 0.5 && types[i] !== "DATE";
-        });
+          const ty = typeOf(c.name);
+          return ty !== "DATE" && ty !== "REAL" && ty !== "INTEGER" && c.distinct >= 2 && c.distinct <= 30 && c.nullRatio < 0.5;
+        }) || null;
+
         const qs = [];
         if (catCol && numCol) qs.push(`按「${catCol.name}」汇总「${numCol}」，列出前 5 名`);
         else if (catCol) qs.push(`按「${catCol.name}」分组计数，列出前 5 名`);
-        else if (numCol) qs.push(`「${numCol}」最大和最小的前 5 条记录`);
-        qs.push(`「${dateCol}」最近的数据有什么趋势？`);
+        if (dateCol && numCol) qs.push(`「${dateCol}」最近的「${numCol}」有什么趋势？`);
+        else if (dateCol) qs.push(`「${dateCol}」最近的数据有什么趋势？`);
         if (catCol) qs.push(`「${catCol.name}」的取值占比各是多少？`);
-        qs.push(`这张表有重复记录吗？依据哪几列判断`);
+        // Multi-table analysis when the conversion produced more than one table
+        if (tables.length >= 2) {
+          const other = tables.find((x) => x !== t) || "另一张表";
+          qs.push(`${t} 和「${other}」有什么关联？帮我一起分析`);
+        }
+        // Generic fallbacks keep the list useful for any shape of data
+        if (qs.length < 3) {
+          qs.push(`这张表有重复记录吗？依据哪几列判断`);
+          qs.push(`帮我看看这张表的数据质量：空值、异常值都在哪里`);
+        }
         qs.slice(0, 4).forEach((q) => {
           const row = document.createElement("button");
           row.className = "aiq";
