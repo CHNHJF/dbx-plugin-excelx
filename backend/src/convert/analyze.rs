@@ -70,6 +70,10 @@ pub fn col_type_from_cells(cells: impl Iterator<Item = String>) -> ColType {
         if saw_date {
             return ColType::Text;
         }
+        // Leading-zero digits are identifiers (001, 007): TEXT, never numbers.
+        if t.len() > 1 && t.starts_with('0') && t.chars().all(|c| c.is_ascii_digit()) {
+            return ColType::Text;
+        }
         match parse_number_loose(t) {
             Some(v) if v.fract() == 0.0 && !t.contains(['.', 'e', 'E']) => saw_int = true,
             Some(_) => saw_real = true,
@@ -102,6 +106,31 @@ fn parse_number_loose(t: &str) -> Option<f64> {
         return None;
     }
     cleaned.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Exact integer parse: parses digit strings directly as i64 without going
+/// through f64, so values like 9007199254740993 keep full precision.
+/// Returns None when the value is not an integer or overflows i64.
+fn parse_integer_exact(t: &str) -> Option<i64> {
+    let cleaned: String = t.trim().chars().filter(|c| *c != ',' && *c != '\u{a0}').collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Reject decimal/exponent forms — those are not integers even if f64-round.
+    if cleaned.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    cleaned.parse::<i64>().ok()
+}
+
+/// True when the integer text is within i64 range but cannot be represented
+/// exactly (used to decide TEXT demotion instead of silent corruption).
+fn integer_overflows_i64(t: &str) -> bool {
+    let cleaned: String = t.trim().chars().filter(|c| *c != ',' && *c != '\u{a0}').collect();
+    if cleaned.is_empty() || cleaned.contains(['.', 'e', 'E']) {
+        return false;
+    }
+    cleaned.parse::<i128>().map(|v| v > i64::MAX as i128 || v < i64::MIN as i128).unwrap_or(true)
 }
 
 /// Recognizes common spreadsheet date/datetime shapes and returns them in
@@ -407,9 +436,16 @@ pub fn coerce_cell(cell: &str, ty: ColType) -> rusqlite::types::Value {
     }
     match ty {
         ColType::Text => rusqlite::types::Value::Text(t.to_string()),
-        ColType::Integer => match parse_number_loose(t) {
-            Some(v) if v.fract() == 0.0 && v.abs() < 9.3e18 => rusqlite::types::Value::Integer(v as i64),
-            _ => rusqlite::types::Value::Text(t.to_string()),
+        ColType::Integer => match parse_integer_exact(t) {
+            Some(v) => rusqlite::types::Value::Integer(v),
+            // Integer that overflows i64: keep the exact text rather than
+            // corrupting it through f64 (9007199254740993 must survive).
+            None if integer_overflows_i64(t) => rusqlite::types::Value::Text(t.to_string()),
+            // Not an integer literal at all (e.g. "2.5"): f64 path decides.
+            None => match parse_number_loose(t) {
+                Some(v) if v.fract() == 0.0 && v.abs() < 9.3e18 => rusqlite::types::Value::Integer(v as i64),
+                _ => rusqlite::types::Value::Text(t.to_string()),
+            },
         },
         ColType::Real => match parse_number_loose(t) {
             Some(v) => rusqlite::types::Value::Real(v),
@@ -531,7 +567,7 @@ mod tests {
             ColType::Integer
         );
         assert_eq!(col_type_from_cells(["a", "1"].iter().map(|s| s.to_string())), ColType::Text);
-        assert_eq!(col_type_from_cells(["001", "002"].iter().map(|s| s.to_string())), ColType::Integer);
+        assert_eq!(col_type_from_cells(["001", "002"].iter().map(|s| s.to_string())), ColType::Text);
         assert_eq!(col_type_from_cells(std::iter::empty::<String>()), ColType::Text);
     }
 
@@ -573,6 +609,30 @@ mod tests {
     fn parses_csv_rows_with_quotes() {
         let rows = split_csv_rows("a,b\n\"x,1\",2\n");
         assert_eq!(rows, vec![vec!["a", "b"], vec!["x,1", "2"]]);
+    }
+
+    #[test]
+    fn long_integers_keep_exact_precision() {
+        use rusqlite::types::Value as V;
+        assert_eq!(coerce_cell("9007199254740993", ColType::Integer), V::Integer(9007199254740993));
+        assert_eq!(coerce_cell("9223372036854775806", ColType::Integer), V::Integer(9223372036854775806));
+        // thousands separators
+        assert_eq!(coerce_cell("1,234,567,890", ColType::Integer), V::Integer(1234567890));
+    }
+
+    #[test]
+    fn overflowing_integers_stay_text() {
+        use rusqlite::types::Value as V;
+        assert_eq!(coerce_cell("9223372036854775808", ColType::Integer), V::Text("9223372036854775808".into()));
+        assert_eq!(coerce_cell("-9223372036854775809", ColType::Integer), V::Text("-9223372036854775809".into()));
+    }
+
+    #[test]
+    fn leading_zeros_infer_text_at_inference_time() {
+        // The reviewer's case: UI default plans echo inferredTypes verbatim,
+        // so inference itself must classify 001-style columns as TEXT.
+        assert_eq!(col_type_from_cells(["001", "002"].iter().map(|s| s.to_string())), ColType::Text);
+        assert_eq!(col_type_from_cells(["0", "42"].iter().map(|s| s.to_string())), ColType::Integer);
     }
 
     #[test]

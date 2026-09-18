@@ -45,6 +45,10 @@ AI 会自动写 SQL、执行并给出答案——不需要懂任何数据库知�
 - **纯本地**：转换全部在本机完成，数据不出电脑
 - 生成的连接是标准 SQLite 连接——DBX 的全部能力（SQL 编辑器、数据编辑、AI 助手）开箱即用
 
+## 平台支持
+
+当前仅支持 **Windows x64**：文件选择对话框与 DBX 数据目录发现使用 Windows 机制（PowerShell + `%APPDATA%`）。macOS / Linux 支持在计划中。
+
 ## 安装
 
 - **插件中心**（上架后）：DBX → Plugin Center 搜索 ExcelX 安装
