@@ -18,6 +18,17 @@ pub struct TablePlan {
 }
 
 pub fn build_plans(sheets: &[SheetData], plans: &[Value]) -> Vec<(SheetData, TablePlan)> {
+    // Sheet selection: the preview UI lets users uncheck sheets; only the
+    // enabled subset becomes tables.
+    let enabled: Vec<usize> = (0..sheets.len())
+        .filter(|i| {
+            let opt = plans.get(*i).and_then(|p| p.get("enabled")).and_then(Value::as_bool);
+            // absent plan entry = default enabled; explicit false = skipped
+            opt.unwrap_or(true)
+        })
+        .collect();
+    let sheets: Vec<SheetData> = enabled.iter().map(|i| sheets[*i].clone()).collect();
+    let plans: Vec<Value> = enabled.iter().map(|i| plans.get(*i).cloned().unwrap_or(Value::Null)).collect();
     let table_names = unique_table_names(&sheets.iter().map(|s| s.source_name.clone()).collect::<Vec<_>>());
     sheets
         .iter()
@@ -56,22 +67,16 @@ pub fn build_plans(sheets: &[SheetData], plans: &[Value]) -> Vec<(SheetData, Tab
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect())
                 .unwrap_or_default();
-            // Default PK: first column (0). "primaryKey": null disables it;
-            // an out-of-range or skipped index also falls back to none.
+            // Default: NO primary key (safer for office data with messy
+            // columns). "primaryKey": <index> opts in; the convert step then
+            // pre-validates uniqueness and fails with the duplicate values.
             let primary_key = match plan.get("primaryKey") {
                 Some(Value::Null) => None,
                 Some(v) => match v.as_u64().map(|u| u as usize) {
                     Some(idx) if idx < width && !skip_columns.contains(&idx) => Some(idx),
                     _ => None,
                 },
-                None => {
-                    let first = 0;
-                    if first < width && !skip_columns.contains(&first) {
-                        Some(first)
-                    } else {
-                        None
-                    }
-                }
+                None => None,
             };
             let table_name = plan
                 .get("tableName")
@@ -113,6 +118,31 @@ pub fn write_database(
 ) -> Result<(), String> {
     conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")
         .map_err(|e| e.to_string())?;
+    // PK uniqueness pre-check: fail before writing anything so the user gets
+    // the offending values instead of a mid-import SQLite error.
+    for (sheet, plan) in planned {
+        if let Some(pk) = plan.primary_key {
+            let mut seen = std::collections::HashMap::new();
+            let mut dup: Vec<String> = Vec::new();
+            for row in &sheet.rows {
+                let v = row.get(pk).map(String::as_str).unwrap_or("").trim().to_string();
+                if v.is_empty() {
+                    continue;
+                }
+                *seen.entry(v.clone()).or_insert(0usize) += 1;
+                if seen[&v] == 2 && dup.len() < 5 {
+                    dup.push(v);
+                }
+            }
+            if !dup.is_empty() {
+                return Err(format!(
+                    "列「{}」被设为主键但存在重复值（如：{}）。请先修正重复值，或把主键改为其他列/无主键。",
+                    sheet.headers.get(pk).map(String::as_str).unwrap_or("?"),
+                    dup.join("、")
+                ));
+            }
+        }
+    }
     for (idx, (sheet, plan)) in planned.iter().enumerate() {
         write_table(conn, sheet, plan)?;
         progress(idx + 1, sheet.rows.len());
@@ -239,7 +269,8 @@ mod tests {
         let s = sheet();
         let plans = vec![json!({
             "tableName": "订单表",
-            "columnTypes": ["TEXT", "REAL", "DATE", "TEXT"]
+            "columnTypes": ["TEXT", "REAL", "DATE", "TEXT"],
+            "primaryKey": 0
         })];
         let planned = build_plans(std::slice::from_ref(&s), &plans);
         assert_eq!(planned[0].1.primary_key, Some(0));
@@ -279,25 +310,54 @@ mod tests {
     }
 
     #[test]
-    fn pk_can_be_moved_or_disabled() {
+    fn pk_defaults_to_none_and_can_opt_in() {
         let s = sheet();
+        // default: no PK
+        assert_eq!(build_plans(std::slice::from_ref(&s), &[])[0].1.primary_key, None);
+        assert_eq!(build_plans(std::slice::from_ref(&s), &[json!({})])[0].1.primary_key, None);
         let moved = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": 2 })]);
         assert_eq!(moved[0].1.primary_key, Some(2));
         let off = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": null })]);
         assert_eq!(off[0].1.primary_key, None);
         // skipped PK column -> no PK rather than a broken DDL
-        let skipped = build_plans(std::slice::from_ref(&s), &[json!({ "skipColumns": [0] })]);
+        let skipped = build_plans(std::slice::from_ref(&s), &[json!({ "skipColumns": [0], "primaryKey": 0 })]);
         assert_eq!(skipped[0].1.primary_key, None);
+    }
+
+    #[test]
+    fn pk_uniqueness_prechecked_with_examples() {
+        let mut s = sheet();
+        s.rows[1][0] = "001".into();
+        let planned = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": 0 })]);
+        let conn = Connection::open_in_memory().unwrap();
+        let err = write_database(&conn, &planned, "x", |_, _| {}).unwrap_err();
+        assert!(err.contains("重复值") && err.contains("001"), "{err}");
+        // unique PK passes
+        let ok = sheet();
+        let planned2 = build_plans(std::slice::from_ref(&ok), &[json!({ "primaryKey": 0 })]);
+        let conn2 = Connection::open_in_memory().unwrap();
+        assert!(write_database(&conn2, &planned2, "x", |_, _| {}).is_ok());
+    }
+
+    #[test]
+    fn disabled_sheets_are_skipped() {
+        let a = sheet();
+        let mut b = sheet();
+        b.source_name = "第二张".into();
+        b.label = "第二张".into();
+        let planned = build_plans(&[a, b], &[json!({}), json!({ "enabled": false })]);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].1.table_name, "订单");
     }
 
     #[test]
     fn pk_duplicates_rejected_with_actionable_message() {
         let mut s = sheet();
         s.rows[1][0] = "001".into(); // duplicate PK value
-        let planned = build_plans(std::slice::from_ref(&s), &[]);
+        let planned = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": 0 })]);
         let conn = Connection::open_in_memory().unwrap();
         let err = write_database(&conn, &planned, "x", |_, _| {}).unwrap_err();
-        assert!(err.contains("主键列存在重复值"), "{err}");
+        assert!(err.contains("被设为主键但存在重复值"), "{err}");
         assert!(err.contains("001"), "{err}");
     }
 

@@ -119,12 +119,12 @@
 
       /* ---------- sheet pills / table ---------- */
       .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
-      .pill {
-        appearance: none; border: 1px solid var(--border); background: var(--bg); color: var(--fg);
-        border-radius: 999px; height: 26px; padding: 0 12px; font: inherit; font-size: 12.5px; cursor: pointer;
-      }
-      .pill:hover { background: var(--muted); }
-      .pill.active { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+      .pill-wrap { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px 3px 8px; background: var(--bg); }
+      .pill-wrap.off { opacity: .45; }
+      .pill-wrap.current { border-color: var(--primary); }
+      .pill-label { appearance: none; border: 0; background: none; color: var(--fg); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+      .pill-wrap.current .pill-label { font-weight: 600; }
+      .pill-wrap input[type="checkbox"] { margin: 0; }
 
       /* DBX DataGrid language: vertical separators only, solid header fill,
          row hover, tabular numerals. Header fills mirror dbx's light/dark. */
@@ -257,7 +257,7 @@
             <div class="step-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></div>
             <div class="step">
               <div class="step-num">3</div>
-              <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/><path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.58 3.25 3.93"/><path d="M9 13.5 6.5 17"/><path d="m14.5 13.5 2.5 3.5"/></svg></div>
+              <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></div>
               <div class="step-t">向 AI 提问</div>
               <div class="step-d">用大白话问，AI 自动写 SQL</div>
             </div>
@@ -356,7 +356,7 @@
         <div id="exp-list-view">
           <div class="card">
             <div class="row between" style="margin-bottom:10px;">
-              <span class="card-title">选择要导出的数据库</span>
+              <span class="card-title">ExcelX 转换的数据库</span>
               <div class="row">
                 <button class="small" id="btn-refresh">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>
@@ -368,7 +368,7 @@
             <div class="row" style="margin-top:12px;">
               <button id="btn-pick-db">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
-                选择本地 .db 文件
+                选择本地 .db 文件（不在列表时）
               </button>
             </div>
           </div>
@@ -387,8 +387,7 @@
             <div id="db-tables" style="margin-top:4px;"></div>
             <div id="export-warnings"></div>
             <div class="row" style="margin-top:12px;">
-              <button class="primary" id="btn-export-xlsx" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出 XLSX（多表 = 多 sheet）</button>
-              <button id="btn-export-csv" disabled>导出 CSV（仅单表）</button>
+              <button class="primary" id="btn-export-xlsx" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出 XLSX</button>
             </div>
           </div>
           <div id="export-result" class="card" hidden>
@@ -458,7 +457,8 @@
               tableName: s.label,
               columnTypes: (s.inferredTypes || []).slice(),
               skipColumns: [],
-              primaryKey: (s.headers || []).length ? 0 : null,
+              primaryKey: null,
+              enabled: true,
             }));
             state.activeSheet = 0;
             renderPreview();
@@ -488,11 +488,21 @@
         const tabs = $("sheet-tabs");
         tabs.innerHTML = "";
         state.sheets.forEach((sh, i) => {
+          const wrap = document.createElement("div");
+          wrap.className = "pill-wrap" + (state.plans[i].enabled === false ? " off" : "") + (i === state.activeSheet ? " current" : "");
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = state.plans[i].enabled !== false;
+          cb.title = "转换此工作表";
+          cb.addEventListener("click", (e) => e.stopPropagation());
+          cb.addEventListener("change", () => { state.plans[i].enabled = cb.checked; renderPreview(); });
           const b = document.createElement("button");
-          b.className = "pill" + (i === state.activeSheet ? " active" : "");
+          b.className = "pill-label";
           b.textContent = `${sh.label} (${sh.rowCount})`;
           b.addEventListener("click", () => { state.activeSheet = i; renderPreview(); });
-          tabs.appendChild(b);
+          wrap.appendChild(cb);
+          wrap.appendChild(b);
+          tabs.appendChild(wrap);
         });
         const plan = state.plans[state.activeSheet];
         $("table-name").value = plan.tableName;
@@ -518,6 +528,7 @@
         };
         renderNullWarnings();
         renderPreviewTable();
+        $("btn-convert").disabled = !state.plans.some((p) => p.enabled !== false);
       }
 
       function renderNullWarnings() {
@@ -642,7 +653,8 @@
               tableName: s.label,
               columnTypes: (s.inferredTypes || []).slice(),
               skipColumns: [],
-              primaryKey: (s.headers || []).length ? 0 : null,
+              primaryKey: null,
+              enabled: true,
             }));
             if (state.activeSheet >= state.sheets.length) state.activeSheet = 0;
             renderPreview();
@@ -659,6 +671,7 @@
       $("btn-convert").addEventListener("click", () => {
         const headerRow = parseInt($("header-row").value, 10) || 0;
         const plans = state.plans.map((p) => ({ ...p, headerRow }));
+        if (!plans.some((p) => p.enabled !== false)) { showImportError("请至少勾选一个要转换的工作表。"); return; }
         show("progress-view");
         $("progress-label").textContent = "正在生成数据库";
         $("progress-bar").style.width = "10%";
@@ -875,14 +888,13 @@
       }
       function refreshExportUi() {
         const sel = selectedTables();
-        $("btn-export-csv").disabled = sel.length !== 1;
         $("btn-export-xlsx").disabled = sel.length === 0;
         const warnBox = $("export-warnings");
         warnBox.innerHTML = "";
         state.dbTables
           .filter((t) => sel.includes(t.name))
           .forEach((t) => {
-            if (t.overXlsxLimit) warnBox.appendChild(warnBanner(`表「${t.name}」超过 xlsx 单表 1,048,576 行上限，导出 xlsx 时将跳过（可单独导出 CSV）`));
+            if (t.overXlsxLimit) warnBox.appendChild(warnBanner(`表「${t.name}」超过 xlsx 单表 1,048,576 行上限，导出 xlsx 时将跳过`));
             (t.csvWarnings || []).forEach((w) => warnBox.appendChild(warnBanner(w)));
           });
       }
@@ -893,11 +905,9 @@
         return d;
       }
 
-      $("btn-export-csv").addEventListener("click", () => doExport("csv"));
       $("btn-export-xlsx").addEventListener("click", () => doExport("xlsx"));
       function doExport(format) {
         const tables = selectedTables();
-        $("btn-export-csv").disabled = true;
         $("btn-export-xlsx").disabled = true;
         invoke("excelx/export", { dbPath: state.dbPath, format, tables }).then(
           (r) => {

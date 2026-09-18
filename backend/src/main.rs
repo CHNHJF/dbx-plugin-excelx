@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use convert::analyze::{parse_any, read_source_file, sheet_to_json};
 use convert::build::{build_plans, list_tables, looks_like_sqlite, write_database};
 use convert::dbx_integrate as dbx;
-use convert::export::{csv_export_warnings, csv_with_bom, export_csv, export_xlsx, XLSX_MAX_ROWS};
+use convert::export::{export_xlsx, XLSX_MAX_ROWS};
 use dbx_plugin_sdk::{PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext};
 use serde_json::{json, Value};
 
@@ -301,7 +301,6 @@ fn db_info(params: &Value) -> Result<Value, PluginError> {
                 "name": name,
                 "rowCount": count,
                 "overXlsxLimit": *count as usize > XLSX_MAX_ROWS,
-                "csvWarnings": csv_export_warnings(&conn, name),
             })
         })
         .collect();
@@ -326,6 +325,9 @@ fn open_sqlite_readonly(db_path: &str) -> Result<rusqlite::Connection, PluginErr
 fn export(params: &Value) -> Result<Value, PluginError> {
     let db_path = str_param(params, "dbPath")?;
     let format = params.get("format").and_then(Value::as_str).unwrap_or("xlsx");
+    if format != "xlsx" {
+        return Err(rpc_err("仅支持导出 XLSX".to_string()));
+    }
     let tables: Vec<String> = params
         .get("tables")
         .and_then(Value::as_array)
@@ -354,22 +356,12 @@ fn export(params: &Value) -> Result<Value, PluginError> {
         })
         .collect();
 
-    let (bytes, file_name) = match format {
-        "csv" => {
-            if chosen.len() != 1 {
-                return Err(rpc_err("CSV 只能导出单张表".to_string()));
-            }
-            let csv = export_csv(&conn, &chosen[0], XLSX_MAX_ROWS).map_err(rpc_err)?;
-            (csv_with_bom(&csv), format!("{}.csv", safe_name(&chosen[0])))
-        }
-        _ => {
-            if chosen.is_empty() {
-                return Err(rpc_err("没有可导出的表".to_string()));
-            }
-            let out = export_xlsx(&conn, &chosen, XLSX_MAX_ROWS).map_err(rpc_err)?;
-            (out, format!("{}.xlsx", safe_name(&file_stem(db_path))))
-        }
-    };
+    if chosen.is_empty() {
+        return Err(rpc_err("没有可导出的表".to_string()));
+    }
+    let out = export_xlsx(&conn, &chosen, XLSX_MAX_ROWS).map_err(rpc_err)?;
+    let (bytes, file_name) = (out, format!("{}.xlsx", safe_name(&file_stem(db_path))));
+    let _ = format;
     let out_dir = Path::new(&db_path).parent().unwrap_or(Path::new(".")).to_path_buf();
     let out_path = unique_path(out_dir.join(&file_name));
     std::fs::write(&out_path, &bytes).map_err(|e| rpc_err(format!("写出文件失败: {e}")))?;
