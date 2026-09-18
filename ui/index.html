@@ -1,0 +1,947 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ExcelX</title>
+    <style>
+      /* DBX design language: tokens are injected by the host into the iframe
+         (--color-*, --radius-*). Fallbacks mirror DBX's light palette so the
+         page still looks right in the dev host. */
+      :root {
+        color-scheme: light dark;
+        --font: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+        --bg: var(--color-background, #ffffff);
+        --fg: var(--color-foreground, #0a0a0a);
+        --muted-fg: var(--color-muted-foreground, #737373);
+        --muted: var(--color-muted, #f5f5f5);
+        --card: var(--color-card, #ffffff);
+        --border: var(--color-border, #e5e5e5);
+        --input: var(--color-input, #e5e5e5);
+        --primary: var(--color-primary, #171717);
+        --primary-fg: var(--color-primary-foreground, #fafafa);
+        --accent: var(--color-accent, #f5f5f5);
+        --destructive: var(--color-destructive, #e7000b);
+        --success: var(--color-success, #16a34a);
+        --warning: var(--color-warning, #d97706);
+        --r-sm: 4px;
+        --r-md: 4px;
+        --r-lg: 6px;
+      }
+      * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.6 var(--font);
+        -webkit-font-smoothing: antialiased;
+      }
+      #app { max-width: 1020px; margin: 0 auto; padding: 20px 24px 56px; }
+
+      /* ---------- header ---------- */
+      .hero {
+        display: flex; align-items: center; gap: 12px;
+        border: 1px solid var(--border); border-radius: var(--r-lg);
+        background: linear-gradient(90deg, color-mix(in srgb, #1d6a40 10%, var(--card)), var(--card) 55%);
+        padding: 14px 16px; margin-bottom: 14px;
+      }
+      .logo { width: 34px; height: 34px; border-radius: 8px; background: #1d6a40; display: inline-flex; align-items: center; justify-content: center; flex: none;
+              box-shadow: 0 2px 6px color-mix(in srgb, #1d6a40 45%, transparent); }
+      .logo svg { width: 17px; height: 17px; }
+      h1 { font-size: 15px; font-weight: 700; letter-spacing: .01em; margin: 0; }
+      .hero .sub { color: var(--muted-fg); margin: 2px 0 0; font-size: 12.5px; }
+
+      /* ---------- tabs ---------- */
+      /* Segmented control, matching DBX's toggle style */
+      .tabs { display: inline-flex; gap: 2px; background: var(--muted); border: 1px solid var(--border); border-radius: var(--r-md); padding: 2px; margin-bottom: 18px; }
+      .tab {
+        appearance: none; background: transparent; border: 0; border-radius: 3px;
+        padding: 5px 16px; font: inherit; font-size: 12.5px; font-weight: 500;
+        color: var(--muted-fg); cursor: pointer; transition: background .12s, color .12s;
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .tab svg { width: 13px; height: 13px; }
+      .tab:hover { color: var(--fg); }
+      .tab.active { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+
+      /* ---------- primitives (DBX button/input system, 30px controls, 4px radius) ---------- */
+      button {
+        appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        height: 30px; padding: 0 12px; border-radius: var(--r-md);
+        border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+        font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap;
+        transition: background .12s, border-color .12s;
+      }
+      button:hover { background: var(--muted); }
+      button:active { background: var(--accent); }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      button:focus-visible { outline: 2px solid var(--color-ring, #a1a1a1); outline-offset: 1px; }
+      button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+      button.primary:hover { opacity: .9; background: var(--primary); }
+      button.ghost { border-color: transparent; background: transparent; }
+      button.ghost:hover { background: var(--muted); }
+      button.small { height: 26px; padding: 0 9px; font-size: 12.5px; }
+      button svg { width: 14px; height: 14px; flex: none; }
+      button.small svg { width: 12.5px; height: 12.5px; }
+
+      input[type="text"], select {
+        height: 30px; padding: 0 9px; border-radius: var(--r-md);
+        border: 1px solid var(--input); background: var(--bg); color: var(--fg);
+        font: inherit; font-size: 13px;
+      }
+      input[type="text"]:focus-visible, select:focus-visible { outline: 2px solid var(--color-ring, #a1a1a1); outline-offset: 1px; }
+      select.cell-select { height: 24px; padding: 0 4px; font-size: 12px; border-radius: 3px; }
+
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .between { justify-content: space-between; }
+      .muted { color: var(--muted-fg); }
+      .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+
+
+      /* ---------- cards ---------- */
+      .card { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 16px; margin-bottom: 12px; background: var(--card);
+              box-shadow: 0 1px 2px rgb(0 0 0 / .04); }
+      .card-title { font-weight: 600; font-size: 13px; }
+
+      /* ---------- empty / drop ---------- */
+      .drop {
+        border: 1px dashed var(--border); border-radius: var(--r-lg);
+        padding: 44px 20px; text-align: center; margin-bottom: 12px;
+      }
+      .drop { transition: border-color .15s, background .15s; }
+      .drop:hover { border-color: var(--color-ring, #a1a1a1); background: color-mix(in srgb, var(--muted) 40%, transparent); }
+      .drop .glyph { display: inline-flex; width: 40px; height: 40px; border-radius: var(--r-lg); background: var(--muted); align-items: center; justify-content: center; margin-bottom: 10px; }
+      .drop .glyph svg { width: 20px; height: 20px; color: var(--muted-fg); }
+      .drop .t { font-weight: 600; }
+      .drop .d { color: var(--muted-fg); font-size: 12.5px; margin: 4px 0 14px; }
+      .empty { text-align: center; color: var(--muted-fg); padding: 36px 16px; }
+
+      /* ---------- sheet pills / table ---------- */
+      .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+      .pill {
+        appearance: none; border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+        border-radius: 999px; height: 26px; padding: 0 12px; font: inherit; font-size: 12.5px; cursor: pointer;
+      }
+      .pill:hover { background: var(--muted); }
+      .pill.active { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+
+      /* DBX DataGrid language: vertical separators only, solid header fill,
+         row hover, tabular numerals. Header fills mirror dbx's light/dark. */
+      .grid-wrap { border: 1px solid var(--border); border-radius: var(--r-md); overflow: auto; margin-top: 10px; max-height: 420px; }
+      table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+      /* dbx DataGrid header: light #efefef / dark #202022 fill, muted text */
+      table.grid th {
+        position: sticky; top: 0; z-index: 2;
+        background: #efefef; color: #52525b; font-weight: 500; text-align: left;
+        padding: 6px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      table.grid th .name { color: #18181b; }
+      :root[data-dbx-theme="dark"] table.grid th { background: #27272a; color: #a1a1aa; }
+      :root[data-dbx-theme="dark"] table.grid th .name { color: #e4e4e7; }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-dbx-theme="light"]) table.grid th { background: #27272a; color: #a1a1aa; }
+        :root:not([data-dbx-theme="light"]) table.grid th .name { color: #e4e4e7; }
+      }
+      table.grid td {
+        padding: 5px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        white-space: nowrap; max-width: 230px; overflow: hidden; text-overflow: ellipsis;
+        background: var(--bg);
+      }
+      table.grid tr:last-child td { border-bottom: 0; }
+      table.grid td:last-child, table.grid th:last-child { border-right: 0; }
+      table.grid tbody tr:hover td { background: color-mix(in srgb, var(--muted) 60%, transparent); }
+      .grid-empty td { color: var(--muted-fg); text-align: center; padding: 22px 0; }
+      .colhead { display: flex; align-items: center; gap: 6px; }
+      .colhead .name { font-weight: 600; }
+      .tag {
+        display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: 3px;
+        font-size: 10.5px; font-weight: 600; border: 1px solid var(--border); color: var(--muted-fg); letter-spacing: .02em;
+      }
+      .tag.pk { border-color: color-mix(in srgb, var(--warning) 45%, transparent); color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, transparent); }
+
+      /* ---------- banners (DBX soft-bg style) ---------- */
+      .banner { display: flex; gap: 8px; align-items: flex-start; border-radius: var(--r-md); padding: 9px 12px; margin: 8px 0; font-size: 12.5px; }
+      .banner svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+      .banner.ok { background: color-mix(in srgb, var(--success) 10%, transparent); color: var(--success); }
+      .banner.warn { background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--warning); }
+      .banner.err { background: color-mix(in srgb, var(--destructive) 8%, transparent); color: var(--destructive); }
+      .banner .body { color: var(--fg); min-width: 0; }
+      .banner .body .lead { font-weight: 600; margin-bottom: 2px; }
+
+      .pathbox {
+        display: flex; align-items: center; gap: 8px; background: var(--muted); border: 1px solid var(--border);
+        border-radius: var(--r-md); padding: 8px 12px; margin: 10px 0;
+      }
+      .pathbox .mono { flex: 1; min-width: 0; word-break: break-all; }
+
+      /* ---------- progress ---------- */
+      .bar { height: 4px; border-radius: 2px; background: var(--muted); overflow: hidden; margin: 12px 0 4px; }
+      .bar > div { height: 100%; background: var(--primary); width: 0; transition: width .25s; }
+
+      /* ---------- export list ---------- */
+      .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+      .item:last-child { border-bottom: 0; }
+      .item .name { font-weight: 500; }
+      .check-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+      .check-row:last-child { border-bottom: 0; }
+      input[type="checkbox"] { accent-color: var(--primary); width: 14px; height: 14px; }
+
+      .steps3 { display: flex; align-items: stretch; gap: 10px; margin-bottom: 12px; }
+      .step { flex: 1; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--card); padding: 14px; position: relative; box-shadow: 0 1px 2px rgb(0 0 0 / .04); }
+      .step-num { position: absolute; top: 10px; right: 12px; font-size: 20px; font-weight: 700; color: color-mix(in srgb, var(--fg) 12%, transparent); line-height: 1; }
+      .step-icon { width: 32px; height: 32px; border-radius: var(--r-md); background: color-mix(in srgb, #1d6a40 12%, transparent); color: #1d6a40; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+      .step-icon svg { width: 16px; height: 16px; }
+      .step-t { font-weight: 600; margin-bottom: 2px; }
+      .step-d { color: var(--muted-fg); font-size: 12px; line-height: 1.5; }
+      .step-arrow { align-self: center; color: var(--muted-fg); flex: none; }
+      .step-arrow svg { width: 16px; height: 16px; }
+      @media (max-width: 760px) { .steps3 { flex-direction: column; } .step-arrow { transform: rotate(90deg); align-self: center; } }
+      .aiq-list { display: flex; flex-direction: column; gap: 6px; }
+      .aiq {
+        width: 100%; justify-content: flex-start; text-align: left; height: auto; min-height: 34px;
+        padding: 7px 12px; font-weight: 400; line-height: 1.5; gap: 8px;
+      }
+      .aiq .go {
+        margin-left: auto; flex: none; height: 24px; padding: 0 10px; font-size: 12px; font-weight: 600;
+        border: 1px solid var(--border); color: var(--muted-fg); background: var(--bg);
+      }
+      .aiq.copied .go { border-color: #1d6a40; color: #1d6a40; }
+      .aiq span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .aiq svg { color: #1d6a40; }
+      .aiq.copied { border-color: #1d6a40; }
+      .col-stat { color: var(--muted-fg); font-size: 10.5px; font-weight: 400; margin-top: 2px; white-space: nowrap; }
+      .hint { background: var(--muted); border-radius: var(--r-md); padding: 10px 12px; margin-bottom: 12px; color: var(--muted-fg); font-size: 12.5px; }
+      .hint b { color: var(--fg); font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="hero">
+        <span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+        <div>
+          <h1>ExcelX</h1>
+          <p class="sub">把表格变成数据库，用大白话向 AI 提问</p>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="import"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>转成数据库</button>
+        <button class="tab" data-tab="export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出表格</button>
+      </div>
+
+      <!-- ==================== 导入 ==================== -->
+      <div id="tab-import">
+        <div id="pick-view">
+          <div class="drop">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+            <div class="t">选择一个表格文件</div>
+            <div class="d">Excel / CSV 均可，编码自动识别</div>
+            <button class="primary" id="pick-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>选择文件</button>
+          </div>
+          <div class="steps3">
+            <div class="step">
+              <div class="step-num">1</div>
+              <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>
+              <div class="step-t">选择表格</div>
+              <div class="step-d">Excel / CSV，每个 sheet 一张表</div>
+            </div>
+            <div class="step-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></div>
+            <div class="step">
+              <div class="step-num">2</div>
+              <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg></div>
+              <div class="step-t">检查理解</div>
+              <div class="step-d">确认列类型和主键即可</div>
+            </div>
+            <div class="step-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></div>
+            <div class="step">
+              <div class="step-num">3</div>
+              <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/><path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.58 3.25 3.93"/><path d="M9 13.5 6.5 17"/><path d="m14.5 13.5 2.5 3.5"/></svg></div>
+              <div class="step-t">向 AI 提问</div>
+              <div class="step-d">用大白话问，AI 自动写 SQL</div>
+            </div>
+          </div>
+          <div class="hint">
+            <b>本地转换</b>　数据不出电脑，生成的 .db 和原文件在同一文件夹。
+          </div>
+        </div>
+
+        <div id="preview-view" hidden>
+          <div class="card">
+            <div class="row between">
+              <div class="row">
+                <span class="card-title" id="src-name"></span>
+                <span class="muted" id="src-meta"></span>
+              </div>
+              <div class="row">
+                <label class="row" style="gap:5px;"><span class="muted">表头行</span><select id="header-row"></select></label>
+                <button id="btn-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v-2a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/></svg>换一个文件</button>
+                <button class="primary" id="btn-convert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-7-7 7 7-7 7"/></svg>转换为数据库</button>
+              </div>
+            </div>
+            <p class="muted" style="margin:10px 0 0;">
+              编号、手机号列请设为「文本」以保留前导零；主键值不能重复。
+            </p>
+          </div>
+
+          <div class="pill-row" id="sheet-tabs"></div>
+          <div class="card">
+            <div class="row between" style="margin-bottom:6px;">
+              <div class="row">
+                <label class="row" style="gap:5px;"><span class="muted">表名</span><input type="text" id="table-name" style="width:180px;" /></label>
+                <label class="row" style="gap:5px; margin-left:8px;"><span class="muted">主键</span><select id="pk-select"></select></label>
+              </div>
+              <span class="muted" id="sheet-rows"></span>
+            </div>
+            <div class="grid-wrap">
+              <table class="grid" id="preview-table"></table>
+            </div>
+          </div>
+        </div>
+
+        <div id="progress-view" hidden>
+          <div class="card">
+            <div class="card-title">正在转换</div>
+            <div class="muted" id="progress-label" style="margin-top:4px;">读取文件中</div>
+            <div class="bar"><div id="progress-bar"></div></div>
+          </div>
+        </div>
+
+        <div id="done-view" hidden>
+          <div class="card">
+            <div class="banner ok">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+              <div class="body"><div class="lead">转换成功</div><span id="done-meta"></span></div>
+            </div>
+            <div class="pathbox">
+              <span class="muted">.db</span>
+              <span class="mono" id="done-path"></span>
+              <button class="small ghost" id="btn-copy-inline">复制</button>
+            </div>
+            <div id="done-warn" class="banner warn" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg>
+              <div class="body" id="done-warn-text"></div>
+            </div>
+            <div class="row">
+              <button class="primary" id="btn-open-dbx"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg>在 DBX 中打开</button>
+              <button id="btn-copy">复制路径</button>
+              <button id="btn-open-folder">打开文件夹</button>
+              <button class="ghost" id="btn-again">继续转换</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title" style="margin-bottom:2px;">试试这样问 AI</div>
+            <p class="muted" style="margin:0 0 8px;">先点上方「在 DBX 中打开」，再复制问题粘贴给 AI 助手。</p>
+            <div id="ai-questions" class="aiq-list"></div>
+          </div>
+        </div>
+
+        <div id="error-view" hidden>
+          <div class="card">
+            <div class="banner err">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+              <div class="body"><div class="lead">转换失败</div><span id="error-text"></span></div>
+            </div>
+            <div class="row">
+              <button id="btn-retry-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>返回调整</button>
+              <button class="ghost" id="btn-back-home">换个文件</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 导出 ==================== -->
+      <div id="tab-export" hidden>
+        <div id="exp-list-view">
+          <div class="card">
+            <div class="row between" style="margin-bottom:10px;">
+              <span class="card-title">选择要导出的数据库</span>
+              <div class="row">
+                <button class="small" id="btn-refresh">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>
+                  刷新
+                </button>
+              </div>
+            </div>
+            <div id="conn-list"><div class="muted">正在读取连接列表…</div></div>
+            <div class="row" style="margin-top:12px;">
+              <button id="btn-pick-db">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                选择本地 .db 文件
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="exp-detail-view" hidden>
+          <div class="card">
+            <div class="row between">
+              <div class="row">
+                <span class="card-title" id="db-name"></span>
+                <span class="muted" id="db-meta"></span>
+              </div>
+              <button class="small ghost" id="btn-back-list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>返回列表</button>
+            </div>
+            <div class="muted" style="margin-top:10px;">勾选要导出的表</div>
+            <div id="db-tables" style="margin-top:4px;"></div>
+            <div id="export-warnings"></div>
+            <div class="row" style="margin-top:12px;">
+              <button class="primary" id="btn-export-xlsx" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出 XLSX（多表 = 多 sheet）</button>
+              <button id="btn-export-csv" disabled>导出 CSV（仅单表）</button>
+            </div>
+          </div>
+          <div id="export-result" class="card" hidden>
+            <div class="banner ok">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+              <div class="body"><div class="lead">已导出</div></div>
+            </div>
+            <div class="pathbox"><span class="muted">文件</span><span class="mono" id="export-path"></span><button class="small ghost" id="btn-copy-export">复制</button></div>
+            <div class="row">
+              <button id="btn-export-folder">打开文件夹</button>
+              <button class="ghost" id="btn-export-again">继续导出</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        path: "", sheets: [], activeSheet: 0, plans: [], lastDb: null,
+        dbPath: "", dbTables: [], _from: "pick-view",
+      };
+      const $ = (id) => document.getElementById(id);
+
+      document.querySelectorAll(".tab").forEach((t) =>
+        t.addEventListener("click", () => {
+          document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+          t.classList.add("active");
+          $("tab-import").hidden = t.dataset.tab !== "import";
+          $("tab-export").hidden = t.dataset.tab !== "export";
+          if (t.dataset.tab === "export") loadConnections();
+        })
+      );
+
+      function show(view) {
+        ["pick-view", "preview-view", "progress-view", "done-view", "error-view"].forEach((v) => ($(v).hidden = v !== view));
+      }
+      function showImportError(msg) {
+        $("error-text").textContent = msg;
+        show("error-view");
+      }
+      function invoke(method, params) { return window.dbxPlugin.invoke(method, params, { timeoutMs: 600000 }); }
+      function request(method, params) { return window.dbxPlugin.request(method, params); }
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+      // ---------------- 导入 ----------------
+      $("pick-btn").addEventListener("click", () =>
+        invoke("excelx/pickFiles", {}).then(
+          (r) => {
+            const paths = (r && r.paths) || [];
+            if (paths.length > 1) showImportError("一次请转换一个文件：\n" + paths.join("\n"));
+            else if (paths.length === 1) analyze(paths[0]);
+          },
+          (e) => showImportError(String(e.message || e))
+        )
+      );
+
+      function analyze(path) {
+        show("progress-view");
+        $("progress-label").textContent = "正在分析 " + path.split(/[\\/]/).pop();
+        $("progress-bar").style.width = "8%";
+        invoke("excelx/analyze", { path }).then(
+          (r) => {
+            state.path = path;
+            state.sheets = r.sheets || [];
+            state.plans = state.sheets.map((s) => ({
+              tableName: s.label,
+              columnTypes: (s.inferredTypes || []).slice(),
+              skipColumns: [],
+              primaryKey: (s.headers || []).length ? 0 : null,
+            }));
+            state.activeSheet = 0;
+            renderPreview();
+            show("preview-view");
+          },
+          (e) => showImportError(String(e.message || e))
+        );
+      }
+
+      function renderPreview() {
+        const s = state.sheets[state.activeSheet];
+        $("src-name").textContent = state.path.split(/[\\/]/).pop();
+        $("src-meta").textContent = `${state.sheets.length} 个工作表 · 每个 sheet 一张表`;
+
+        const hr = $("header-row");
+        if (!hr.options.length) {
+          for (let i = 0; i <= 5; i++) {
+            const o = document.createElement("option");
+            o.value = String(i);
+            o.textContent = i === 0 ? "无表头" : `第 ${i} 行`;
+            hr.appendChild(o);
+          }
+          hr.value = "1";
+          hr.onchange = () => reanalyze(parseInt(hr.value, 10) || 0);
+        }
+
+        const tabs = $("sheet-tabs");
+        tabs.innerHTML = "";
+        state.sheets.forEach((sh, i) => {
+          const b = document.createElement("button");
+          b.className = "pill" + (i === state.activeSheet ? " active" : "");
+          b.textContent = `${sh.label} (${sh.rowCount})`;
+          b.addEventListener("click", () => { state.activeSheet = i; renderPreview(); });
+          tabs.appendChild(b);
+        });
+        const plan = state.plans[state.activeSheet];
+        $("table-name").value = plan.tableName;
+        $("sheet-rows").textContent = `${s.headers.length} 列 · ${s.rowCount} 行（预览前 15 行）`;
+
+        const pk = $("pk-select");
+        pk.innerHTML = "";
+        const noneOpt = document.createElement("option");
+        noneOpt.value = "";
+        noneOpt.textContent = "无主键";
+        pk.appendChild(noneOpt);
+        s.headers.forEach((h, ci) => {
+          if (plan.skipColumns.includes(ci)) return;
+          const o = document.createElement("option");
+          o.value = String(ci);
+          o.textContent = h;
+          pk.appendChild(o);
+        });
+        pk.value = plan.primaryKey === null ? "" : String(plan.primaryKey);
+        pk.onchange = () => {
+          plan.primaryKey = pk.value === "" ? null : parseInt(pk.value, 10);
+          renderPreviewTable();
+        };
+        renderNullWarnings();
+        renderPreviewTable();
+      }
+
+      function renderNullWarnings() {
+        let holder = $("null-warn-holder");
+        if (!holder) {
+          holder = document.createElement("div");
+          holder.id = "null-warn-holder";
+          const pills = $("sheet-tabs");
+          pills.parentNode.insertBefore(holder, pills.nextSibling);
+        }
+        holder.innerHTML = "";
+        nullWarnings(state.sheets[state.activeSheet]).forEach((w) => {
+          const d = document.createElement("div");
+          d.className = "banner warn";
+          d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg><div class="body">${esc(w)}</div>`;
+          holder.appendChild(d);
+        });
+      }
+
+      const numericType = (t) => t === "INTEGER" || t === "REAL";
+      const TYPE_LABEL = { TEXT: "文本", INTEGER: "整数", REAL: "小数", DATE: "日期" };
+      function sheetSummaryText() {
+        if (state.sheets.length === 1) {
+          const sh = state.sheets[0];
+          const dist = typeDistribution(sh);
+          return `1 张表 · ${sh.headers.length} 列 · ${sh.rowCount} 行 · ` + dist;
+        }
+        const totalCols = state.sheets.reduce((a, x) => a + x.headers.length, 0);
+        const totalRows = state.sheets.reduce((a, x) => a + x.rowCount, 0);
+        return `${state.sheets.length} 张表（每个 sheet 一张） · 共 ${totalCols} 列 / ${totalRows} 行`;
+      }
+      function typeDistribution(sh) {
+        const counts = {};
+        (sh.inferredTypes || []).forEach((t) => (counts[t] = (counts[t] || 0) + 1));
+        return Object.entries(counts).map(([t, n]) => `${TYPE_LABEL[t] || t} ${n}`).join(" · ");
+      }
+      function nullWarnings(sh) {
+        return (sh.columnProfiles || [])
+          .filter((c) => c.nullRatio > 0.3)
+          .map((c) => `列「${c.name}」有 ${Math.round(c.nullRatio * 100)}% 空值`);
+      }
+      function renderPreviewTable() {
+        const s = state.sheets[state.activeSheet];
+        const plan = state.plans[state.activeSheet];
+        const tbl = $("preview-table");
+        tbl.innerHTML = "";
+        const headRow = document.createElement("tr");
+        s.headers.forEach((h, ci) => {
+          const th = document.createElement("th");
+          const wrap = document.createElement("div");
+          wrap.className = "colhead";
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = h;
+          name.title = h;
+          const sel = document.createElement("select");
+          sel.className = "cell-select";
+          [
+            ["TEXT", "文本"],
+            ["INTEGER", "整数"],
+            ["REAL", "小数"],
+            ["DATE", "日期"],
+            ["SKIP", "跳过"],
+          ].forEach(([v, label]) => {
+            const o = document.createElement("option");
+            o.value = v;
+            o.textContent = label;
+            sel.appendChild(o);
+          });
+          sel.value = plan.skipColumns.includes(ci) ? "SKIP" : plan.columnTypes[ci];
+          sel.onchange = () => {
+            if (sel.value === "SKIP") {
+              if (!plan.skipColumns.includes(ci)) plan.skipColumns.push(ci);
+              if (plan.primaryKey === ci) plan.primaryKey = null;
+            } else {
+              plan.skipColumns = plan.skipColumns.filter((x) => x !== ci);
+              plan.columnTypes[ci] = sel.value;
+            }
+          };
+          wrap.appendChild(name);
+          if (numericType(plan.columnTypes[ci])) wrap.style.justifyContent = "flex-end";
+          if (plan.primaryKey === ci) {
+            const tag = document.createElement("span");
+            tag.className = "tag pk";
+            tag.textContent = "主键";
+            wrap.appendChild(tag);
+          }
+          wrap.appendChild(sel);
+          const prof = (s.columnProfiles || [])[ci] || {};
+          const pct = Math.round((1 - (prof.nullRatio ?? 0)) * 100);
+          const stat = document.createElement("div");
+          stat.className = "col-stat";
+          stat.textContent = `${pct}% 有值 · ${prof.distinct ?? "?"} 种值`;
+          if ((prof.samples || []).length) stat.title = "样本：" + prof.samples.join("、");
+          th.appendChild(wrap);
+          th.appendChild(stat);
+          headRow.appendChild(th);
+        });
+        tbl.appendChild(headRow);
+        (s.sampleRows || []).slice(0, 15).forEach((r) => {
+          const tr = document.createElement("tr");
+          s.headers.forEach((_, ci) => {
+            const td = document.createElement("td");
+            td.textContent = r[ci] ?? "";
+            if (numericType(plan.columnTypes[ci])) {
+              td.style.textAlign = "right";
+              td.style.fontVariantNumeric = "tabular-nums";
+            }
+            tr.appendChild(td);
+          });
+          tbl.appendChild(tr);
+        });
+      }
+
+      function reanalyze(headerRow) {
+        show("progress-view");
+        $("progress-label").textContent = "按新表头行重新解析";
+        invoke("excelx/analyze", { path: state.path, headerRow }).then(
+          (r) => {
+            state.sheets = r.sheets || [];
+            state.plans = state.sheets.map((s) => ({
+              tableName: s.label,
+              columnTypes: (s.inferredTypes || []).slice(),
+              skipColumns: [],
+              primaryKey: (s.headers || []).length ? 0 : null,
+            }));
+            if (state.activeSheet >= state.sheets.length) state.activeSheet = 0;
+            renderPreview();
+            show("preview-view");
+          },
+          (e) => showImportError(String(e.message || e))
+        );
+      }
+
+      $("table-name").addEventListener("input", () => {
+        state.plans[state.activeSheet].tableName = $("table-name").value;
+      });
+      $("btn-back").addEventListener("click", () => show("pick-view"));
+      $("btn-convert").addEventListener("click", () => {
+        const headerRow = parseInt($("header-row").value, 10) || 0;
+        const plans = state.plans.map((p) => ({ ...p, headerRow }));
+        show("progress-view");
+        $("progress-label").textContent = "正在生成数据库";
+        $("progress-bar").style.width = "10%";
+        invoke("excelx/convert", { path: state.path, plans }).then(
+          (r) => {
+            state.lastDb = r;
+            $("done-meta").textContent = `已生成 ${r.tables.length} 张表 · 共 ${r.totalRows} 行` +
+              (r.connectionName ? ` · 连接「${r.connectionName}」已加入列表` : "");
+            $("done-path").textContent = r.dbPath;
+            const warn = $("done-warn");
+            if (r.registered === false) {
+              warn.hidden = false;
+              $("done-warn-text").textContent = "文件已生成，但自动加入连接列表失败" +
+                (r.registerError ? "：" + r.registerError : "") + "。请在 DBX 新建 SQLite 连接并选择该文件。";
+            } else {
+              warn.hidden = true;
+            }
+            $("progress-bar").style.width = "100%";
+            renderAiQuestions(r);
+            // 防御：成功路径警告框必然隐藏（仅注册失败才显示）
+            if (r.registered !== false) $("done-warn").hidden = true;
+            show("done-view");
+          },
+          (e) => showImportError(String(e.message || e))
+        );
+      });
+
+      if (window.dbxPlugin.onEvent) {
+        const off = window.dbxPlugin.onEvent((ev) => {
+          if (ev && ev.method === "excelx/progress" && ev.params) {
+            const { tablesDone, tablesTotal } = ev.params;
+            const pct = Math.min(95, 10 + Math.round((tablesDone / Math.max(1, tablesTotal)) * 85));
+            $("progress-bar").style.width = pct + "%";
+            $("progress-label").textContent = `已写入 ${tablesDone}/${tablesTotal} 张表`;
+          }
+        });
+        window.addEventListener("beforeunload", () => off && off());
+      }
+
+      function renderAiQuestions(r) {
+        const box = $("ai-questions");
+        box.innerHTML = "";
+        const tables = r.tables || [];
+        const t = tables[0] || "这张表";
+        // Dynamic: derive from the confirmed sheet's column profiles so the
+        // suggestions reference real column names, not placeholders.
+        const sh = state.sheets[0] || {};
+        const prof = sh.columnProfiles || [];
+        const colNames = sh.headers || prof.map((c) => c.name);
+        const types = sh.inferredTypes || [];
+        const dateIdx = types.indexOf("DATE");
+        const dateCol = dateIdx >= 0 ? colNames[dateIdx] : "日期";
+        const numIdx = types.findIndex((x) => x === "REAL" || x === "INTEGER");
+        const numCol = numIdx >= 0 ? colNames[numIdx] : null;
+        const catIdx = (name) => colNames.indexOf(name);
+        const catCol = prof.find((c) => {
+          const i = catIdx(c.name);
+          return c.distinct >= 2 && c.distinct <= 30 && c.nullRatio < 0.5 && types[i] !== "DATE";
+        });
+        const qs = [];
+        if (catCol && numCol) qs.push(`按「${catCol.name}」汇总「${numCol}」，列出前 5 名`);
+        else if (catCol) qs.push(`按「${catCol.name}」分组计数，列出前 5 名`);
+        else if (numCol) qs.push(`「${numCol}」最大和最小的前 5 条记录`);
+        qs.push(`「${dateCol}」最近的数据有什么趋势？`);
+        if (catCol) qs.push(`「${catCol.name}」的取值占比各是多少？`);
+        qs.push(`这张表有重复记录吗？依据哪几列判断`);
+        qs.slice(0, 4).forEach((q) => {
+          const row = document.createElement("button");
+          row.className = "aiq";
+          // DBX's own AI icon: lucide Sparkles
+          row.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg><span>${esc(q)}</span><span class="go">复制</span>`;
+          row.addEventListener("click", () => {
+            request("host.copy", { text: q }).then(() => {
+              row.classList.add("copied");
+              const go = row.querySelector(".go");
+              go.dataset.old = go.textContent;
+              go.textContent = "已复制";
+              setTimeout(() => { go.textContent = go.dataset.old; row.classList.remove("copied"); }, 1500);
+            }).catch(() => {});
+          });
+          box.appendChild(row);
+        });
+      }
+
+      $("btn-open-dbx").addEventListener("click", () => {
+        if (!state.lastDb || !state.lastDb.connectionId) return;
+        invoke("excelx/openInDbx", { connectionId: state.lastDb.connectionId, table: (state.lastDb.tables || [])[0] }).catch(
+          (e) => showImportError(String(e.message || e))
+        );
+      });
+      $("btn-copy").addEventListener("click", () => {
+        request("host.copy", { text: state.lastDb.dbPath }).then(
+          () => {
+            $("btn-copy").textContent = "已复制";
+            setTimeout(() => ($("btn-copy").textContent = "复制路径"), 1500);
+          },
+          () => showImportError("复制失败，请手动选择路径文本复制")
+        );
+      });
+      $("btn-open-folder").addEventListener("click", () => {
+        invoke("excelx/openFolder", { path: state.lastDb.dbPath }).catch(() => {});
+      });
+      bindCopyInline("btn-copy-inline", () => state.lastDb.dbPath);
+      bindCopyInline("btn-copy-export", () => $("export-path").textContent);
+      function bindCopyInline(id, getText) {
+        const b = $(id);
+        b.addEventListener("click", () => {
+          request("host.copy", { text: getText() }).then(() => {
+            b.textContent = "已复制";
+            setTimeout(() => (b.textContent = "复制"), 1400);
+          }).catch(() => {});
+        });
+      }
+      $("btn-again").addEventListener("click", () => show("pick-view"));
+      $("btn-retry-back").addEventListener("click", () => show("preview-view"));
+      $("btn-back-home").addEventListener("click", () => show("pick-view"));
+
+      // ---------------- 导出 ----------------
+      function loadConnections() {
+        invoke("excelx/listDbxConnections", {}).then(
+          (r) => renderConnections((r && r.connections) || []),
+          (e) => renderConnectionsError(String(e.message || e))
+        );
+      }
+      function renderConnectionsError(msg) {
+        $("conn-list").innerHTML = `<div class="banner err"><div class="body">读取连接列表失败：${esc(msg)}</div></div>`;
+      }
+      function renderConnections(conns) {
+        const box = $("conn-list");
+        box.innerHTML = "";
+        const usable = conns.filter((c) => c.dbPath);
+        if (!usable.length) {
+          box.innerHTML = '<div class="empty">还没有 SQLite 连接。<br>先在「转成数据库」页转换一个表格。</div>';
+          return;
+        }
+        usable.forEach((c) => {
+          const item = document.createElement("div");
+          item.className = "item";
+          const left = document.createElement("div");
+          const name = document.createElement("div");
+          name.className = "name";
+          name.textContent = c.name || "(未命名)";
+          const path = document.createElement("div");
+          path.className = "muted mono";
+          path.textContent = c.dbPath + (c.exists === false ? "（文件不存在）" : "");
+          left.appendChild(name);
+          left.appendChild(path);
+          const btn = document.createElement("button");
+          btn.className = "small";
+          btn.textContent = "选择";
+          btn.disabled = c.exists === false;
+          btn.addEventListener("click", () => loadDbInfo(c.dbPath, c.name));
+          item.appendChild(left);
+          item.appendChild(btn);
+          box.appendChild(item);
+        });
+      }
+
+      $("btn-refresh").addEventListener("click", loadConnections);
+      $("btn-pick-db").addEventListener("click", () =>
+        invoke("excelx/pickDbFile", {}).then(
+          (r) => { if (r && r.path) loadDbInfo(r.path, ""); },
+          (e) => renderConnectionsError(String(e.message || e))
+        )
+      );
+
+      function loadDbInfo(path, name) {
+        invoke("excelx/dbInfo", { path }).then(
+          (r) => {
+            state.dbPath = r.path;
+            state.dbTables = r.tables || [];
+            $("exp-list-view").hidden = true;
+            $("exp-detail-view").hidden = false;
+            $("export-result").hidden = true;
+            $("db-name").textContent = name || path.split(/[\\/]/).pop();
+            const sizeMb = (r.fileSize / 1048576).toFixed(1);
+            $("db-meta").textContent = `${state.dbTables.length} 张表 · ${sizeMb} MB`;
+            const box = $("db-tables");
+            box.innerHTML = "";
+            if (!state.dbTables.length) {
+              box.innerHTML = '<div class="empty">这个数据库没有可导出的表。</div>';
+            }
+            state.dbTables.forEach((t) => {
+              const row = document.createElement("div");
+              row.className = "check-row";
+              const label = document.createElement("label");
+              label.style.display = "flex";
+              label.style.gap = "8px";
+              label.style.alignItems = "center";
+              const cb = document.createElement("input");
+              cb.type = "checkbox";
+              cb.checked = true;
+              cb.dataset.table = t.name;
+              cb.addEventListener("change", refreshExportUi);
+              const nameSpan = document.createElement("span");
+              nameSpan.textContent = t.name;
+              const meta = document.createElement("span");
+              meta.className = "muted";
+              meta.textContent = `${Number(t.rowCount).toLocaleString()} 行` + (t.overXlsxLimit ? " · 超出 xlsx 上限" : "");
+              label.appendChild(cb);
+              label.appendChild(nameSpan);
+              label.appendChild(meta);
+              row.appendChild(label);
+              box.appendChild(row);
+            });
+            refreshExportUi();
+          },
+          (e) => renderConnectionsError(String(e.message || e))
+        );
+      }
+
+      function selectedTables() {
+        return Array.from(document.querySelectorAll("#db-tables input[type=checkbox]:checked")).map((cb) => cb.dataset.table);
+      }
+      function refreshExportUi() {
+        const sel = selectedTables();
+        $("btn-export-csv").disabled = sel.length !== 1;
+        $("btn-export-xlsx").disabled = sel.length === 0;
+        const warnBox = $("export-warnings");
+        warnBox.innerHTML = "";
+        state.dbTables
+          .filter((t) => sel.includes(t.name))
+          .forEach((t) => {
+            if (t.overXlsxLimit) warnBox.appendChild(warnBanner(`表「${t.name}」超过 xlsx 单表 1,048,576 行上限，导出 xlsx 时将跳过（可单独导出 CSV）`));
+            (t.csvWarnings || []).forEach((w) => warnBox.appendChild(warnBanner(w)));
+          });
+      }
+      function warnBanner(text) {
+        const d = document.createElement("div");
+        d.className = "banner warn";
+        d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg><div class="body">${esc(text)}</div>`;
+        return d;
+      }
+
+      $("btn-export-csv").addEventListener("click", () => doExport("csv"));
+      $("btn-export-xlsx").addEventListener("click", () => doExport("xlsx"));
+      function doExport(format) {
+        const tables = selectedTables();
+        $("btn-export-csv").disabled = true;
+        $("btn-export-xlsx").disabled = true;
+        invoke("excelx/export", { dbPath: state.dbPath, format, tables }).then(
+          (r) => {
+            $("export-path").textContent = r.path;
+            const holder = $("export-result");
+            holder.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
+            const anchor = holder.querySelector(".banner.ok");
+            (r.warnings || []).forEach((w) => holder.insertBefore(warnBanner(w), anchor.nextSibling));
+            holder.hidden = false;
+          },
+          (e) => {
+            const holder = $("export-result");
+            holder.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
+            const anchor = holder.querySelector(".banner.ok");
+            const d = document.createElement("div");
+            d.className = "banner err";
+            d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg><div class="body">导出失败：${esc(String(e.message || e))}</div>`;
+            holder.insertBefore(d, anchor.nextSibling);
+            holder.hidden = false;
+          }
+        );
+      }
+      $("btn-export-folder").addEventListener("click", () => {
+        const p = $("export-path").textContent;
+        if (p) invoke("excelx/openFolder", { path: p }).catch(() => {});
+      });
+      $("btn-export-again").addEventListener("click", () => { $("export-result").hidden = true; refreshExportUi(); });
+      $("btn-back-list").addEventListener("click", () => { $("exp-detail-view").hidden = true; $("exp-list-view").hidden = false; loadConnections(); });
+
+      // Theme detection: DBX injects resolved --color-* tokens; derive
+      // light/dark from the background luminance so the grid header fill
+      // (which copies dbx's hardcoded light/dark values) can follow.
+      function applyThemeFromTokens() {
+        try {
+          const v = getComputedStyle(document.documentElement).getPropertyValue("--color-background").trim();
+          const m = v.match(/\d+/g);
+          if (!m) return;
+          const [r, g, b] = m.map(Number);
+          const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          document.documentElement.dataset.dbxTheme = lum >= 128 ? "light" : "dark";
+        } catch { /* dev host fallback: leave unset */ }
+      }
+      window.dbxPlugin.ready.then(() => { applyThemeFromTokens(); setTimeout(applyThemeFromTokens, 60); });
+      window.addEventListener("dbx-plugin-env", () => setTimeout(applyThemeFromTokens, 30));
+    </script>
+  </body>
+</html>

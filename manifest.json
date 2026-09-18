@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.github.chnhjf.excelx",
+  "name": "ExcelX",
+  "version": "0.8.2",
+  "publisher": "chnhjf",
+  "description": "Convert spreadsheets (xlsx/xls/csv) to SQLite databases and back.",
+  "icon": "assets/plugin.svg",
+  "engines": {
+    "host_api": "1"
+  },
+  "entrypoints": {
+    "backend": {
+      "protocol_versions": [
+        1
+      ],
+      "transport": "stdio-jsonl",
+      "executable": "bin/dbx-plugin-excelx"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "io.github.chnhjf.excelx.workbench",
+      "label": "ExcelX",
+      "description": "Spreadsheet ⇄ SQLite converter.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "ExcelX",
+      "description": "表格 ⇄ SQLite 双向转换小工具。",
+      "contributions": {
+        "io.github.chnhjf.excelx.workbench": {
+          "label": "ExcelX",
+          "description": "表格 ⇄ SQLite 双向转换。"
+        }
+      }
+    }
+  }
+}
