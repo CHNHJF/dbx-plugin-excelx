@@ -167,7 +167,8 @@
       .banner.ok { background: color-mix(in srgb, var(--success) 10%, transparent); color: var(--success); }
       .banner.warn { background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--warning); }
       .banner.err { background: color-mix(in srgb, var(--destructive) 8%, transparent); color: var(--destructive); }
-      .banner .body { color: var(--fg); min-width: 0; }
+      .banner .body { color: var(--fg); min-width: 0; flex: 1; }
+      .banner .row { margin: 0; }
       .banner .body .lead { font-weight: 600; margin-bottom: 2px; }
 
       .pathbox {
@@ -285,6 +286,7 @@
             </p>
           </div>
 
+          <div id="replace-confirm" hidden></div>
           <div class="pill-row" id="sheet-tabs"></div>
           <div class="card">
             <div class="row between" style="margin-bottom:6px;">
@@ -434,16 +436,25 @@
       const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
       // ---------------- 导入 ----------------
-      $("pick-btn").addEventListener("click", () =>
-        invoke("excelx/pickFiles", {}).then(
-          (r) => {
-            const paths = (r && r.paths) || [];
-            if (paths.length > 1) showImportError("一次请转换一个文件：\n" + paths.join("\n"));
-            else if (paths.length === 1) analyze(paths[0]);
-          },
-          (e) => showImportError(String(e.message || e))
-        )
-      );
+      const waitForPick = (startMethod, doneEvent) =>
+        new Promise((resolve) => {
+          if (doneEvent === "excelx/pickFilesDone") window.__pickResolve = resolve;
+          else window.__pickDbResolve = resolve;
+          invoke(startMethod, {}).catch((e) => {
+            if (doneEvent === "excelx/pickFilesDone") window.__pickResolve = null;
+            else window.__pickDbResolve = null;
+            resolve({ error: String(e.message || e) });
+          });
+        });
+
+      $("pick-btn").addEventListener("click", async () => {
+        const r = await waitForPick("excelx/pickFiles", "excelx/pickFilesDone");
+        if (!r || r.error) { if (r && r.error) showImportError(r.error); return; }
+        if (r.cancelled) return;
+        const paths = r.paths || [];
+        if (paths.length > 1) showImportError("一次请转换一个文件：\n" + paths.join("\n"));
+        else if (paths.length === 1) analyze(paths[0]);
+      });
 
       function analyze(path) {
         show("progress-view");
@@ -458,9 +469,9 @@
               columnTypes: (s.inferredTypes || []).slice(),
               skipColumns: [],
               primaryKey: null,
-              enabled: true,
+              enabled: !s.hidden, // hidden sheets opt-in only
             }));
-            state.activeSheet = 0;
+            state.activeSheet = firstEnabledSheet();
             renderPreview();
             show("preview-view");
           },
@@ -498,7 +509,8 @@
           cb.addEventListener("change", () => { state.plans[i].enabled = cb.checked; renderPreview(); });
           const b = document.createElement("button");
           b.className = "pill-label";
-          b.textContent = `${sh.label} (${sh.rowCount})`;
+          b.textContent = sh.hidden ? `${sh.label}（隐藏）(${sh.rowCount})` : `${sh.label} (${sh.rowCount})`;
+          if (sh.hidden) b.title = "此工作表在 Excel 中是隐藏的，默认不转换；勾选可包含";
           b.addEventListener("click", () => { state.activeSheet = i; renderPreview(); });
           wrap.appendChild(cb);
           wrap.appendChild(b);
@@ -506,7 +518,10 @@
         });
         const plan = state.plans[state.activeSheet];
         $("table-name").value = plan.tableName;
-        $("sheet-rows").textContent = `${s.headers.length} 列 · ${s.rowCount} 行（预览前 15 行）`;
+        const isWide = s.headers.length > PREVIEW_COL_LIMIT;
+        $("sheet-rows").textContent = isWide
+          ? `${s.headers.length} 列（预览仅显示前 ${PREVIEW_COL_LIMIT} 列，转换不受影响） · ${s.rowCount} 行`
+          : `${s.headers.length} 列 · ${s.rowCount} 行（预览前 15 行）`;
 
         const pk = $("pk-select");
         pk.innerHTML = "";
@@ -540,12 +555,23 @@
           pills.parentNode.insertBefore(holder, pills.nextSibling);
         }
         holder.innerHTML = "";
-        nullWarnings(state.sheets[state.activeSheet]).forEach((w) => {
-          const d = document.createElement("div");
-          d.className = "banner warn";
-          d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg><div class="body">${esc(w)}</div>`;
-          holder.appendChild(d);
-        });
+        const ws = nullWarnings(state.sheets[state.activeSheet]);
+        if (!ws.length) return;
+        let text;
+        if (ws.length <= 3) {
+          text = ws.join("；");
+        } else {
+          text = `${ws.slice(0, 3).join("；")}；等 ${ws.length} 列空值较多，AI 分析这些列时覆盖会较少`;
+        }
+        const d = document.createElement("div");
+        d.className = "banner warn";
+        d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg><div class="body">${esc(text)}</div>`;
+        holder.appendChild(d);
+      }
+
+      function firstEnabledSheet() {
+        const i = state.plans.findIndex((p) => p.enabled !== false);
+        return i >= 0 ? i : 0;
       }
 
       const numericType = (t) => t === "INTEGER" || t === "REAL";
@@ -570,13 +596,19 @@
           .filter((c) => c.nullRatio > 0.3)
           .map((c) => `列「${c.name}」有 ${Math.round(c.nullRatio * 100)}% 空值`);
       }
+      const PREVIEW_COL_LIMIT = 60;
+
       function renderPreviewTable() {
         const s = state.sheets[state.activeSheet];
         const plan = state.plans[state.activeSheet];
         const tbl = $("preview-table");
         tbl.innerHTML = "";
+        // Wide-sheet guard: render only the first 60 columns; conversion is
+        // unaffected. The notice rides in the sheet-rows caption.
+        const wide = s.headers.length > PREVIEW_COL_LIMIT;
+        const cols = wide ? s.headers.slice(0, PREVIEW_COL_LIMIT) : s.headers;
         const headRow = document.createElement("tr");
-        s.headers.forEach((h, ci) => {
+        cols.forEach((h, ci) => {
           const th = document.createElement("th");
           const wrap = document.createElement("div");
           wrap.className = "colhead";
@@ -630,7 +662,7 @@
         tbl.appendChild(headRow);
         (s.sampleRows || []).slice(0, 15).forEach((r) => {
           const tr = document.createElement("tr");
-          s.headers.forEach((_, ci) => {
+          cols.forEach((_, ci) => {
             const td = document.createElement("td");
             td.textContent = r[ci] ?? "";
             if (numericType(plan.columnTypes[ci])) {
@@ -654,9 +686,10 @@
               columnTypes: (s.inferredTypes || []).slice(),
               skipColumns: [],
               primaryKey: null,
-              enabled: true,
+              enabled: !s.hidden,
             }));
-            if (state.activeSheet >= state.sheets.length) state.activeSheet = 0;
+            if (state.activeSheet >= state.sheets.length || state.plans[state.activeSheet].enabled === false)
+              state.activeSheet = firstEnabledSheet();
             renderPreview();
             show("preview-view");
           },
@@ -669,13 +702,57 @@
       });
       $("btn-back").addEventListener("click", () => show("pick-view"));
       $("btn-convert").addEventListener("click", () => {
+        // Re-convert flow: if the target .db already exists, confirm replace
+        // (default) vs new copy — replaces the old _2/_3 pile-up behavior.
+        const target = targetDbPath(state.path);
+        invoke("excelx/dbInfo", { path: target }).then(
+          (info) => askReplaceThenConvert(target, info),
+          () => runConvert(false) // not a sqlite file / missing -> normal path
+        );
+      });
+      function targetDbPath(srcPath) {
+        const i = srcPath.lastIndexOf(".");
+        return (i > 0 ? srcPath.slice(0, i) : srcPath) + ".db";
+      }
+      function askReplaceThenConvert(target, info) {
+        const nTables = (info && info.tables || []).length;
+        // Inline confirm banner (sandboxed iframes may block window.confirm)
+        const holder = $("replace-confirm");
+        holder.innerHTML = "";
+        const row = document.createElement("div");
+        row.className = "banner warn";
+        row.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg>
+          <div class="body">同名 .db 已存在（${nTables} 张表）：${esc(target)}。重新转换时覆盖它，还是另存新副本？</div>`;
+        const actions = document.createElement("div");
+        actions.className = "row";
+        actions.style.marginLeft = "auto";
+        const btnReplace = document.createElement("button");
+        btnReplace.className = "primary small";
+        btnReplace.textContent = "覆盖重建";
+        const btnCopy2 = document.createElement("button");
+        btnCopy2.className = "small";
+        btnCopy2.textContent = "另存副本";
+        const btnCancel = document.createElement("button");
+        btnCancel.className = "ghost small";
+        btnCancel.textContent = "取消";
+        actions.appendChild(btnReplace); actions.appendChild(btnCopy2); actions.appendChild(btnCancel);
+        row.appendChild(actions);
+        holder.appendChild(row);
+        holder.hidden = false;
+        holder.scrollIntoView({ behavior: "smooth", block: "center" });
+        const done = () => { holder.hidden = true; holder.innerHTML = ""; };
+        btnReplace.addEventListener("click", () => { done(); runConvert(true); });
+        btnCopy2.addEventListener("click", () => { done(); runConvert(false); });
+        btnCancel.addEventListener("click", done);
+      }
+      function runConvert(overwrite) {
         const headerRow = parseInt($("header-row").value, 10) || 0;
         const plans = state.plans.map((p) => ({ ...p, headerRow }));
         if (!plans.some((p) => p.enabled !== false)) { showImportError("请至少勾选一个要转换的工作表。"); return; }
         show("progress-view");
         $("progress-label").textContent = "正在生成数据库";
         $("progress-bar").style.width = "10%";
-        invoke("excelx/convert", { path: state.path, plans }).then(
+        invoke("excelx/convert", { path: state.path, plans, overwrite }).then(
           (r) => {
             state.lastDb = r;
             $("done-meta").textContent = `已生成 ${r.tables.length} 张表 · 共 ${r.totalRows} 行` +
@@ -697,15 +774,34 @@
           },
           (e) => showImportError(String(e.message || e))
         );
-      });
+      }
+
+      // File-picker results arrive as events (the OS dialog can outlive the
+      // bridge's 120s invoke cap, so the RPC only starts it).
+      window.__pickResolve = null;
+      window.__pickDbResolve = null;
 
       if (window.dbxPlugin.onEvent) {
         const off = window.dbxPlugin.onEvent((ev) => {
-          if (ev && ev.method === "excelx/progress" && ev.params) {
-            const { tablesDone, tablesTotal } = ev.params;
-            const pct = Math.min(95, 10 + Math.round((tablesDone / Math.max(1, tablesTotal)) * 85));
+          if (!ev) return;
+          if (ev.method === "excelx/pickFilesDone" && window.__pickResolve) {
+            const r = window.__pickResolve; window.__pickResolve = null;
+            r(ev.params || { paths: [], cancelled: true });
+            return;
+          }
+          if (ev.method === "excelx/pickDbDone" && window.__pickDbResolve) {
+            const r = window.__pickDbResolve; window.__pickDbResolve = null;
+            r(ev.params || { paths: [], cancelled: true });
+            return;
+          }
+          if (ev.method === "excelx/progress" && ev.params) {
+            const p = ev.params;
+            const rowsDone = p.rowsDone || 0;
+            const rowsTotal = Math.max(1, p.rowsTotal || 1);
+            const pct = Math.min(96, 8 + Math.round((rowsDone / rowsTotal) * 88));
             $("progress-bar").style.width = pct + "%";
-            $("progress-label").textContent = `已写入 ${tablesDone}/${tablesTotal} 张表`;
+            const rowsTxt = rowsTotal > 1 ? ` · ${Number(rowsDone).toLocaleString()}/${Number(rowsTotal).toLocaleString()} 行` : "";
+            $("progress-label").textContent = `正在写入「${p.table || ""}」(第 ${p.tableIndex || 1}/${p.tablesTotal || 1} 张)${rowsTxt}`;
           }
         });
         window.addEventListener("beforeunload", () => off && off());
@@ -723,8 +819,6 @@
         box.innerHTML = "";
         const tables = (r.tables || []).filter(Boolean);
         const t = tables[0] || "这张表";
-        // Dynamic: derive from the confirmed sheets' column profiles so the
-        // suggestions reference real, human-meaningful column names.
         const sheets = (state.sheets || []).filter(
           (_, i) => (state.plans[i] || {}).enabled !== false
         );
@@ -736,41 +830,51 @@
           const i = colNames.indexOf(name);
           return i >= 0 ? types[i] : null;
         };
-        const dateCol = prof.length
-          ? (colNames.find((n) => typeOf(n) === "DATE" && !isTechColumn(n)) || null)
-          : null;
-        const numCol = prof.length
-          ? (prof.find((c) => {
-              const ty = typeOf(c.name);
-              return (ty === "REAL" || ty === "INTEGER") && c.distinct > 5;
-            }) || {}).name || null
-          : null;
-        const catCol = prof.find((c) => {
+        const cols = (ty) => prof.filter((c) => typeOf(c.name) === ty);
+        const dateCols = cols("DATE");
+        const numCols = cols("REAL").concat(cols("INTEGER")).filter((c) => c.distinct > 4);
+        const catCols = prof.filter((c) => {
           const ty = typeOf(c.name);
-          return ty !== "DATE" && ty !== "REAL" && ty !== "INTEGER" && c.distinct >= 2 && c.distinct <= 30 && c.nullRatio < 0.5;
-        }) || null;
+          return ty === "TEXT" && c.distinct >= 2 && c.distinct <= 30 && c.nullRatio < 0.5;
+        });
+        const longTextCols = prof.filter((c) => typeOf(c.name) === "TEXT" && c.distinct > 100);
 
         const qs = [];
-        if (catCol && numCol) qs.push(`按「${catCol.name}」汇总「${numCol}」，列出前 5 名`);
-        else if (catCol) qs.push(`按「${catCol.name}」分组计数，列出前 5 名`);
-        if (dateCol && numCol) qs.push(`「${dateCol}」最近的「${numCol}」有什么趋势？`);
-        else if (dateCol) qs.push(`「${dateCol}」最近的数据有什么趋势？`);
-        if (catCol) qs.push(`「${catCol.name}」的取值占比各是多少？`);
-        // Multi-table analysis when the conversion produced more than one table
+        // 数值 + 分类：排名类问题（最有分析价值的组合）
+        if (catCols.length && numCols.length) {
+          const cat = catCols[0].name, num = numCols[0].name;
+          qs.push(`按「${cat}」统计「${num}」的总量和平均，排出前 5 名`);
+        }
+        // 日期 + 数值：趋势类
+        if (dateCols.length && numCols.length) {
+          qs.push(`「${dateCols[0].name}」按月看「${numCols[0].name}」，哪个月最高？和上月比变化多少？`);
+        }
+        // 分类占比
+        if (catCols.length) {
+          qs.push(`「${catCols[0].name}」的分布是怎样的？哪类占了大头？`);
+        }
+        // 多分类交叉
+        if (catCols.length >= 2) {
+          qs.push(`「${catCols[0].name}」和「${catCols[1].name}」有什么关联？交叉统计看看`);
+        }
+        // 多表
         if (tables.length >= 2) {
           const other = tables.find((x) => x !== t) || "另一张表";
-          qs.push(`${t} 和「${other}」有什么关联？帮我一起分析`);
+          qs.push(`${t} 和「${other}」怎么关联？帮我一起分析`);
         }
-        // Generic fallbacks keep the list useful for any shape of data
+        // 异常检测（有数值列时）
+        if (numCols.length) {
+          qs.push(`「${numCols[0].name}」有没有明显偏大偏小的异常值？分别在哪几行？`);
+        }
+        // 兜底
         if (qs.length < 3) {
           qs.push(`这张表有重复记录吗？依据哪几列判断`);
-          qs.push(`帮我看看这张表的数据质量：空值、异常值都在哪里`);
+          qs.push(`帮我检查数据质量：空值和格式混乱的地方`);
         }
         qs.slice(0, 4).forEach((q) => {
           const row = document.createElement("button");
           row.className = "aiq";
-          // DBX's own AI icon: lucide Sparkles
-          row.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg><span>${esc(q)}</span><span class="go">复制</span>`;
+          row.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg><span>${esc(q)}</span><span class="go">复制</span>`;
           row.addEventListener("click", () => {
             request("host.copy", { text: q }).then(() => {
               row.classList.add("copied");
@@ -859,12 +963,13 @@
       }
 
       $("btn-refresh").addEventListener("click", loadConnections);
-      $("btn-pick-db").addEventListener("click", () =>
-        invoke("excelx/pickDbFile", {}).then(
-          (r) => { if (r && r.path) loadDbInfo(r.path, ""); },
-          (e) => renderConnectionsError(String(e.message || e))
-        )
-      );
+      $("btn-pick-db").addEventListener("click", async () => {
+        const r = await waitForPick("excelx/pickDbFile", "excelx/pickDbDone");
+        if (!r || r.error) { if (r && r.error) renderConnectionsError(r.error); return; }
+        if (r.cancelled) return;
+        const p = (r.paths || [])[0];
+        if (p) loadDbInfo(p, "");
+      });
 
       function loadDbInfo(path, name) {
         invoke("excelx/dbInfo", { path }).then(

@@ -110,11 +110,24 @@ fn sanitize_table_name(raw: &str, fallback: &str) -> String {
 
 /// Writes the sheet into the database. Progress callback receives
 /// (table_index, rows_done).
+/// Progress payload pushed per write batch.
+#[derive(Debug, Clone, Copy)]
+pub struct ConvertProgress {
+    pub table_index: usize,
+    pub tables_total: usize,
+    pub rows_done: usize,
+    pub rows_total: usize,
+}
+
+/// Rows per progress callback. 5000 keeps the event volume tiny while a
+/// 500k-row sheet still updates ~100 times.
+pub const PROGRESS_BATCH: usize = 5000;
+
 pub fn write_database(
     conn: &Connection,
     planned: &[(SheetData, TablePlan)],
     source_path: &str,
-    mut progress: impl FnMut(usize, usize),
+    mut progress: impl FnMut(ConvertProgress),
 ) -> Result<(), String> {
     conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")
         .map_err(|e| e.to_string())?;
@@ -122,36 +135,57 @@ pub fn write_database(
     // the offending values instead of a mid-import SQLite error.
     for (sheet, plan) in planned {
         if let Some(pk) = plan.primary_key {
-            let mut seen = std::collections::HashMap::new();
-            let mut dup: Vec<String> = Vec::new();
-            for row in &sheet.rows {
+            let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut dups: Vec<(String, usize)> = Vec::new();
+            for (ri, row) in sheet.rows.iter().enumerate() {
                 let v = row.get(pk).map(String::as_str).unwrap_or("").trim().to_string();
                 if v.is_empty() {
                     continue;
                 }
-                *seen.entry(v.clone()).or_insert(0usize) += 1;
-                if seen[&v] == 2 && dup.len() < 5 {
-                    dup.push(v);
+                let n = seen.entry(v.clone()).or_insert(0usize);
+                *n += 1;
+                // record first duplicate occurrence per value (data row 1-based,
+                // header excluded)
+                if *n == 2 && dups.len() < 5 {
+                    dups.push((v, ri + 1));
                 }
             }
-            if !dup.is_empty() {
+            if !dups.is_empty() {
+                let detail = dups
+                    .iter()
+                    .map(|(v, r)| format!("「{v}」第 {r} 行"))
+                    .collect::<Vec<_>>()
+                    .join("、");
                 return Err(format!(
-                    "列「{}」被设为主键但存在重复值（如：{}）。请先修正重复值，或把主键改为其他列/无主键。",
+                    "列「{}」被设为主键但存在重复值（{}）。请修正这些行，或把主键改为其他列/无主键。",
                     sheet.headers.get(pk).map(String::as_str).unwrap_or("?"),
-                    dup.join("、")
+                    detail
                 ));
             }
         }
     }
+    let rows_total: usize = planned.iter().map(|(s, _)| s.rows.len()).sum();
     for (idx, (sheet, plan)) in planned.iter().enumerate() {
-        write_table(conn, sheet, plan)?;
-        progress(idx + 1, sheet.rows.len());
+        let base: usize = planned[..idx].iter().map(|(s, _)| s.rows.len()).sum();
+        // write_table reports table-local rows; add this table's base so the
+        // event carries the global position across the whole conversion.
+        progress(ConvertProgress { table_index: idx, tables_total: planned.len(), rows_done: base, rows_total });
+        let mut table_progress = |p: ConvertProgress| progress(ConvertProgress { rows_done: base + p.rows_done, ..p });
+        write_table(conn, sheet, plan, idx, planned.len(), rows_total, &mut table_progress)?;
     }
     let _ = source_path;
     Ok(())
 }
 
-fn write_table(conn: &Connection, sheet: &SheetData, plan: &TablePlan) -> Result<(), String> {
+fn write_table(
+    conn: &Connection,
+    sheet: &SheetData,
+    plan: &TablePlan,
+    table_index: usize,
+    tables_total: usize,
+    rows_total: usize,
+    progress: &mut impl FnMut(ConvertProgress),
+) -> Result<(), String> {
     let skip: std::collections::HashSet<usize> = plan.skip_columns.iter().copied().collect();
     let kept: Vec<usize> = (0..sheet.headers.len()).filter(|i| !skip.contains(i)).collect();
     if kept.is_empty() {
@@ -187,7 +221,7 @@ fn write_table(conn: &Connection, sheet: &SheetData, plan: &TablePlan) -> Result
     let mut stmt = conn
         .prepare(&insert)
         .map_err(|e| format!("准备写入 {} 失败: {e}", plan.table_name))?;
-    for row in &sheet.rows {
+    for (n, row) in sheet.rows.iter().enumerate() {
         let values: Vec<rusqlite::types::Value> = kept
             .iter()
             .map(|&i| coerce_cell(&row[i], plan.column_types[i]))
@@ -195,6 +229,10 @@ fn write_table(conn: &Connection, sheet: &SheetData, plan: &TablePlan) -> Result
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
         if let Err(e) = stmt.execute(params.as_slice()) {
             return Err(format_insert_error(e, &plan.table_name, row));
+        }
+        if (n + 1) % PROGRESS_BATCH == 0 || n + 1 == sheet.rows.len() {
+            // table-local milestone; write_database's wrapper adds the base
+            progress(ConvertProgress { table_index, tables_total, rows_done: n + 1, rows_total });
         }
     }
     Ok(())
@@ -261,6 +299,7 @@ mod tests {
             ],
             inferred_types: vec![ColType::Text, ColType::Real, ColType::Date, ColType::Text],
             skipped_header_rows: 0,
+            hidden: false,
         }
     }
 
@@ -275,7 +314,7 @@ mod tests {
         let planned = build_plans(std::slice::from_ref(&s), &plans);
         assert_eq!(planned[0].1.primary_key, Some(0));
         let conn = Connection::open_in_memory().unwrap();
-        write_database(&conn, &planned, "C:/t/订单.xlsx", |_, _| {}).unwrap();
+        write_database(&conn, &planned, "C:/t/订单.xlsx", |_| {}).unwrap();
 
         let value: (String, f64, String) = conn
             .query_row(
@@ -330,13 +369,36 @@ mod tests {
         s.rows[1][0] = "001".into();
         let planned = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": 0 })]);
         let conn = Connection::open_in_memory().unwrap();
-        let err = write_database(&conn, &planned, "x", |_, _| {}).unwrap_err();
+        let err = write_database(&conn, &planned, "x", |_| {}).unwrap_err();
         assert!(err.contains("重复值") && err.contains("001"), "{err}");
         // unique PK passes
         let ok = sheet();
         let planned2 = build_plans(std::slice::from_ref(&ok), &[json!({ "primaryKey": 0 })]);
         let conn2 = Connection::open_in_memory().unwrap();
-        assert!(write_database(&conn2, &planned2, "x", |_, _| {}).is_ok());
+        assert!(write_database(&conn2, &planned2, "x", |_| {}).is_ok());
+    }
+
+    #[test]
+    fn progress_events_cover_batch_milestones() {
+        let mut s = sheet();
+        // 3 tables x 6000 rows: batch milestones at 5000/6000 per table
+        s.rows = (0..6000).map(|i| vec![format!("{i:05}"), "1.5".into(), "2024-1-2".into(), "x".into()]).collect();
+        let sheets = vec![s.clone(), s.clone(), s];
+        let planned = build_plans(&sheets, &[json!({}), json!({}), json!({})]);
+        let conn = Connection::open_in_memory().unwrap();
+        let mut events: Vec<ConvertProgress> = Vec::new();
+        write_database(&conn, &planned, "x", |p| events.push(p)).unwrap();
+        assert_eq!(events.len(), 9); // (2 milestones + final) x 3 tables... inspect
+        let last = events.last().unwrap();
+        assert_eq!(last.rows_total, 18000);
+        assert_eq!(last.rows_done, 18000);
+        assert_eq!(last.tables_total, 3);
+        // monotonic rows_done within each table
+        let mut prev = 0;
+        for e in &events {
+            assert!(e.rows_done >= prev, "non-monotonic: {e:?}");
+            prev = e.rows_done;
+        }
     }
 
     #[test]
@@ -356,8 +418,8 @@ mod tests {
         s.rows[1][0] = "001".into(); // duplicate PK value
         let planned = build_plans(std::slice::from_ref(&s), &[json!({ "primaryKey": 0 })]);
         let conn = Connection::open_in_memory().unwrap();
-        let err = write_database(&conn, &planned, "x", |_, _| {}).unwrap_err();
-        assert!(err.contains("被设为主键但存在重复值"), "{err}");
+        let err = write_database(&conn, &planned, "x", |_| {}).unwrap_err();
+        assert!(err.contains("被设为主键但存在重复值") && err.contains("行"), "{err}");
         assert!(err.contains("001"), "{err}");
     }
 
@@ -367,7 +429,7 @@ mod tests {
         let plans = vec![json!({ "skipColumns": [3], "primaryKey": 0 })];
         let planned = build_plans(std::slice::from_ref(&s), &plans);
         let conn = Connection::open_in_memory().unwrap();
-        write_database(&conn, &planned, "x", |_, _| {}).unwrap();
+        write_database(&conn, &planned, "x", |_| {}).unwrap();
         let cols: i64 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('订单')", [], |r| r.get(0))
             .unwrap();

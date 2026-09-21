@@ -47,6 +47,9 @@ pub struct SheetData {
     pub rows: Vec<Vec<String>>,
     pub inferred_types: Vec<ColType>,
     pub skipped_header_rows: usize,
+    /// Hidden sheets (Excel hidden / very-hidden) convert only when the user
+    /// explicitly opts in; the preview marks them.
+    pub hidden: bool,
 }
 
 pub fn col_type_from_cells(cells: impl Iterator<Item = String>) -> ColType {
@@ -137,9 +140,22 @@ fn integer_overflows_i64(t: &str) -> bool {
 /// SQLite-preferred `YYYY-MM-DD[ HH:MM:SS]` form. DATE columns store as TEXT
 /// in ISO form — sorts correctly, stays human-readable, round-trips.
 pub fn parse_date_loose(t: &str) -> Option<String> {
+    parse_date_loose_impl(t)
+}
+
+fn parse_date_loose_impl(t: &str) -> Option<String> {
     let t = t.trim();
     let len = t.len();
-    if !(8..=26).contains(&len) {
+    if !(8..=32).contains(&len) {
+        return None;
+    }
+    // Chinese office format: 2024年1月2日 or 2024年1月2日 14:30
+    if let Some(day_pos) = t.find('日') {
+        let (date_cn, tail) = t.split_at(day_pos + "日".len());
+        let rest = date_cn.strip_suffix("日").unwrap_or(date_cn);
+        if let Some(normalized) = normalize_cn_date_with_time(rest, tail) {
+            return Some(normalized);
+        }
         return None;
     }
     let all_ok = t.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | ':' | ' ' | '.' | 'T'));
@@ -168,6 +184,35 @@ pub fn parse_date_loose(t: &str) -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}{time}"))
 }
 
+/// "2024年1月2" (日 stripped by caller) -> normalized "2024-01-02" with an
+/// optional trailing time "14:30" preserved as " 14:30:00".
+fn normalize_cn_date_with_time(rest: &str, tail: &str) -> Option<String> {
+    let time_part = tail.trim();
+    let time_part = if time_part.is_empty() { None } else { Some(time_part) };
+    let date_part = rest;
+    let mut parts = date_part.split('年');
+    let y: u32 = parts.next()?.parse().ok()?;
+    let rest = parts.next()?;
+    let mut sub = rest.split('月');
+    let mo: u32 = sub.next()?.parse().ok()?;
+    let d: u32 = sub.next()?.trim().parse().ok()?;
+    if !(1990..=2100).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let time = match time_part {
+        Some(tp) => {
+            let tp = tp.trim_start_matches([' ', ',']);
+            let segs: Vec<u32> = tp.split(':').filter_map(|x| x.parse().ok()).collect();
+            if segs.len() < 2 || segs.iter().any(|v| *v > 59) {
+                return None;
+            }
+            format!(" {:02}:{:02}:{:02}", segs[0], segs[1], segs.get(2).copied().unwrap_or(0))
+        }
+        None => String::new(),
+    };
+    Some(format!("{y:04}-{mo:02}-{d:02}{time}"))
+}
+
 fn split_date_time(t: &str) -> Option<(&str, Option<&str>)> {
     if let Some(pos) = t.find(|c| c == ' ' || c == 'T') {
         // Reject "1 2 3"-style noise: only one separator allowed.
@@ -181,10 +226,11 @@ fn split_date_time(t: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn split_ymd(date_part: &str) -> Option<(u32, u32, u32)> {
-    if date_part.contains('/') && date_part.contains('-') {
+    let seps = date_part.contains('/') as u8 + date_part.contains('-') as u8 + date_part.contains('.') as u8;
+    if seps > 1 {
         return None;
     }
-    let parts: Vec<&str> = date_part.split(['-', '/']).collect();
+    let parts: Vec<&str> = date_part.split(['-', '/', '.']).collect();
     if parts.len() != 3 {
         return None;
     }
@@ -282,6 +328,7 @@ fn parse_sheet_body(body: Vec<Vec<String>>, header_mode: usize, skipped: usize, 
             rows: vec![],
             inferred_types: vec![],
             skipped_header_rows: skipped,
+            hidden: false,
         };
     }
     let headers: Vec<String> = if headers_raw.is_empty() {
@@ -310,6 +357,7 @@ fn parse_sheet_body(body: Vec<Vec<String>>, header_mode: usize, skipped: usize, 
         rows: data_rows,
         inferred_types,
         skipped_header_rows: skipped,
+        hidden: false,
     }
 }
 
@@ -337,11 +385,62 @@ pub fn parse_csv_file(bytes: &[u8], source_name: &str) -> Result<SheetData, Stri
     Ok(sheet)
 }
 
+
+/// Sheet visibility straight from `xl/workbook.xml` (calamine 0.30 keeps
+/// `Metadata.sheets` private). Returns names with state hidden/veryHidden.
+fn hidden_sheet_names(bytes: &[u8]) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    use std::io::Read;
+    let mut out = HashSet::new();
+    let mut zip = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+        Ok(z) => z,
+        Err(_) => return out,
+    };
+    let mut xml = match zip.by_name("xl/workbook.xml") {
+        Ok(f) => f,
+        Err(_) => return out,
+    };
+    let mut buf = String::new();
+    if xml.read_to_string(&mut buf).is_err() {
+        return out;
+    }
+    // <sheet name="..." sheetId="1" state="hidden" r:id="rId1"/>
+    for cap in regex_lite_regex_find(&buf) {
+        out.insert(cap);
+    }
+    out
+}
+
+/// Minimal scan for hidden sheet declarations without a full XML parser:
+/// finds `name="X"` on `<sheet ...>` tags that also carry a hidden state.
+fn regex_lite_regex_find(xml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = xml;
+    while let Some(pos) = rest.find("<sheet ") {
+        let tag_end = match rest[pos..].find('>') {
+            Some(e) => pos + e,
+            None => break,
+        };
+        let tag = &rest[pos..tag_end];
+        if tag.contains("state=\"hidden\"") || tag.contains("state=\"veryHidden\"") {
+            if let Some(npos) = tag.find("name=\"") {
+                let start = npos + 6;
+                if let Some(epos) = tag[start..].find('"') {
+                    names.push(tag[start..start + epos].to_string());
+                }
+            }
+        }
+        rest = &rest[tag_end..];
+    }
+    names
+}
+
 pub fn parse_workbook(bytes: &[u8], _source_name: &str) -> Result<Vec<SheetData>, String> {
     use calamine::Reader;
     let cursor = std::io::Cursor::new(bytes);
     let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
         .map_err(|e| format!("无法读取表格文件: {e}"))?;
+    let hidden_names = hidden_sheet_names(bytes);
     let mut sheets = Vec::new();
     for (name, range) in workbook.worksheets() {
         if range.height() == 0 && range.width() == 0 {
@@ -371,7 +470,8 @@ pub fn parse_workbook(bytes: &[u8], _source_name: &str) -> Result<Vec<SheetData>
                     .collect()
             })
             .collect();
-        let sheet = parse_sheet(raw, &name);
+        let mut sheet = parse_sheet(raw, &name);
+        sheet.hidden = hidden_names.contains(&name);
         if !sheet.headers.is_empty() {
             sheets.push(sheet);
         }
@@ -424,6 +524,7 @@ pub fn sheet_to_json(sheet: &SheetData) -> Value {
         "inferredTypes": sheet.inferred_types.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
         "sampleRows": sample,
         "skippedHeaderRows": sheet.skipped_header_rows,
+        "hidden": sheet.hidden,
         "columnProfiles": column_profiles(sheet),
     })
 }
@@ -488,6 +589,7 @@ pub fn reparse_with_headers(
     let cursor = std::io::Cursor::new(bytes);
     let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
         .map_err(|e| format!("无法读取表格文件: {e}"))?;
+    let hidden_names = hidden_sheet_names(bytes);
     let mut sheets = Vec::new();
     for (idx, (name, range)) in workbook.worksheets().into_iter().enumerate() {
         if range.height() == 0 && range.width() == 0 {
@@ -517,7 +619,8 @@ pub fn reparse_with_headers(
             })
             .collect();
         let hr = header_rows.get(idx).copied().unwrap_or(1);
-        let sheet = parse_sheet_with_header(raw, &name, hr);
+        let mut sheet = parse_sheet_with_header(raw, &name, hr);
+        sheet.hidden = hidden_names.contains(&name);
         if !sheet.headers.is_empty() {
             sheets.push(sheet);
         }
@@ -585,6 +688,13 @@ mod tests {
 
     #[test]
     fn parses_dates_to_iso() {
+        assert_eq!(parse_date_loose("2024年1月2日").as_deref(), Some("2024-01-02"));
+        assert_eq!(parse_date_loose("2024年12月31日").as_deref(), Some("2024-12-31"));
+        assert_eq!(parse_date_loose("2024年1月2日 14:30").as_deref(), Some("2024-01-02 14:30:00"));
+        assert_eq!(parse_date_loose("2024.1.2").as_deref(), Some("2024-01-02"));
+        assert_eq!(parse_date_loose("2024.12.31").as_deref(), Some("2024-12-31"));
+        assert_eq!(parse_date_loose("2024年13月1日"), None);
+        assert_eq!(parse_date_loose("这不是日期日"), None);
         assert_eq!(parse_date_loose("2024-1-2").as_deref(), Some("2024-01-02"));
         assert_eq!(parse_date_loose("2024/01/02").as_deref(), Some("2024-01-02"));
         assert_eq!(parse_date_loose("2024-01-02 8:30").as_deref(), Some("2024-01-02 08:30:00"));

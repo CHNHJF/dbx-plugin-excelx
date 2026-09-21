@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use convert::analyze::{parse_any, read_source_file, sheet_to_json};
 use convert::build::{build_plans, list_tables, looks_like_sqlite, write_database};
 use convert::dbx_integrate as dbx;
-use convert::export::{export_xlsx, XLSX_MAX_ROWS};
+use convert::export::{export_xlsx_with_notes, XLSX_MAX_ROWS};
 use dbx_plugin_sdk::{PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext};
 use serde_json::{json, Value};
 
@@ -28,7 +28,7 @@ impl PluginHandler for Plugin {
     ) -> Result<Value, PluginError> {
         match method {
             // --- import pipeline ---
-            "excelx/pickFiles" => pick_files(),
+            "excelx/pickFiles" => pick_files(emitter),
             "excelx/analyze" => analyze(&params),
             "excelx/convert" => convert(&params, emitter),
 
@@ -39,7 +39,7 @@ impl PluginHandler for Plugin {
             "excelx/listDbxConnections" => Ok(json!({ "connections": dbx::list_all_sqlite_connections() })),
 
             // --- export pipeline ---
-            "excelx/pickDbFile" => pick_db_file(),
+            "excelx/pickDbFile" => pick_db_file(emitter),
             "excelx/dbInfo" => db_info(&params),
             "excelx/export" => export(&params),
             "excelx/openFolder" => open_folder(&params),
@@ -58,24 +58,45 @@ fn rpc_err(e: String) -> PluginError {
 
 /// Native file picker: the sandboxed iframe only sees File objects without
 /// real paths, so the sidecar opens the OS dialog and returns plain paths.
-fn pick_files() -> Result<Value, PluginError> {
-    native_dialog_pick(
+/// File picking is fire-and-forget: the OS dialog blocks for as long as the
+/// user browses, which outlives the host bridge's hard 120s invoke cap. So
+/// this RPC only launches the dialog and returns immediately; the result (or
+/// cancellation) arrives as an `excelx/pickFilesDone` event.
+fn pick_files(emitter: &PluginEmitter) -> Result<Value, PluginError> {
+    spawn_dialog(
+        emitter.clone(),
+        "excelx/pickFilesDone",
         "选择要转换的表格",
         "Spreadsheets|*.xlsx;*.xlsm;*.xlsb;*.xls;*.csv;*.tsv|All files|*.*",
         true,
-    )
-    .map(|paths| json!({ "paths": paths }))
-    .map_err(rpc_err)
+    );
+    Ok(json!({ "started": true }))
 }
 
 /// Export-side picker restricted to SQLite files (any SQLite, not just ours).
-fn pick_db_file() -> Result<Value, PluginError> {
-    let picked = native_dialog_pick("选择 SQLite 数据库文件", "SQLite database|*.db;*.sqlite;*.sqlite3;*.db3", false)
-        .map_err(rpc_err)?;
-    match picked.first() {
-        Some(p) => Ok(json!({ "path": p })),
-        None => Ok(json!({ "path": Value::Null })),
-    }
+fn pick_db_file(emitter: &PluginEmitter) -> Result<Value, PluginError> {
+    spawn_dialog(
+        emitter.clone(),
+        "excelx/pickDbDone",
+        "选择 SQLite 数据库文件",
+        "SQLite database|*.db;*.sqlite;*.sqlite3;*.db3",
+        false,
+    );
+    Ok(json!({ "started": true }))
+}
+
+/// Runs the PowerShell dialog on a background thread and pushes the outcome
+/// as a plugin event; see pick_files for why the RPC cannot wait.
+fn spawn_dialog(emitter: PluginEmitter, event: &'static str, title: &'static str, filter: &'static str, multiselect: bool) {
+    std::thread::spawn(move || {
+        let result = native_dialog_pick(title, filter, multiselect);
+        let payload = match result {
+            Ok(paths) if !paths.is_empty() => json!({ "paths": paths, "cancelled": false }),
+            Ok(_) => json!({ "paths": [], "cancelled": true }),
+            Err(e) => json!({ "paths": [], "error": e }),
+        };
+        let _ = emitter.event(event, payload);
+    });
 }
 
 fn native_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Vec<String>, String> {
@@ -89,14 +110,19 @@ fn native_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Ve
     let script = format!(
         r#"
 Add-Type -AssemblyName System.Windows.Forms
+$top = New-Object System.Windows.Forms.Form
+$top.TopMost = $true
+$top.MinimizeBox = $false
 $dlg = New-Object System.Windows.Forms.OpenFileDialog
 $dlg.Filter = '{filter}'
 $dlg.Multiselect = {ms}
 $dlg.Title = '{title}'
-if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+if ($dlg.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) {{
   $dlg.FileNames | Out-File -FilePath $env:EXCELX_PICK_OUT -Encoding utf8
+  $top.Dispose()
 }} else {{
   '' | Out-File -FilePath $env:EXCELX_PICK_OUT -Encoding utf8
+  $top.Dispose()
 }}
 "#,
     );
@@ -172,7 +198,23 @@ fn analyze(params: &Value) -> Result<Value, PluginError> {
 fn convert(params: &Value, emitter: &PluginEmitter) -> Result<Value, PluginError> {
     let path = str_param(params, "path")?;
     let plans = params.get("plans").and_then(Value::as_array).cloned().unwrap_or_default();
-    let out_path = output_path_for(path);
+    // overwrite: replace an existing .db at the default path (re-convert flow)
+    // instead of minting _2/_3 copies. Defaults to false for safety.
+    let overwrite = params.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    let out_path = if overwrite {
+        output_path_overwrite(path)
+    } else {
+        output_path_for(path)
+    };
+    // Self-overwrite guard: converting a .db-suffixed text file would resolve
+    // the output to the input itself and destroy the source on rename.
+    let same_target = std::fs::canonicalize(&out_path).ok()
+        .zip(std::fs::canonicalize(path).ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or_else(|| out_path == Path::new(path));
+    if same_target {
+        return Err(rpc_err("输出路径与源文件相同，已取消转换以免覆盖源文件。".to_string()));
+    }
 
     let bytes = read_source_file(path).map_err(rpc_err)?;
     let header_rows: Vec<usize> = plans
@@ -193,10 +235,17 @@ fn convert(params: &Value, emitter: &PluginEmitter) -> Result<Value, PluginError
     {
         let conn = rusqlite::Connection::open(&staging)
             .map_err(|e| rpc_err(format!("创建数据库失败: {e}")))?;
-        write_database(&conn, &planned, path, |tables_done, _| {
+        write_database(&conn, &planned, path, |p| {
             let _ = emitter.event(
                 "excelx/progress",
-                json!({ "stage": "convert", "tablesDone": tables_done, "tablesTotal": planned.len() }),
+                json!({
+                    "stage": "convert",
+                    "table": planned.get(p.table_index).map(|(_, x)| x.table_name.clone()).unwrap_or_default(),
+                    "tableIndex": p.table_index + 1,
+                    "tablesTotal": p.tables_total,
+                    "rowsDone": p.rows_done,
+                    "rowsTotal": p.rows_total,
+                }),
             );
         })
         .map_err(rpc_err)?;
@@ -233,6 +282,17 @@ fn convert(params: &Value, emitter: &PluginEmitter) -> Result<Value, PluginError
         "connectionId": conn_id,
         "connectionName": conn_name,
     }))
+}
+
+/// Overwrite mode: the default .db path even when it already exists. Used by
+/// the re-convert flow after the user confirms replacement in the UI.
+fn output_path_overwrite(source: &str) -> PathBuf {
+    let stem = Path::new(source)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("excelx");
+    let dir = Path::new(source).parent().unwrap_or(Path::new("."));
+    dir.join(format!("{stem}.db"))
 }
 
 /// <source>.xlsx -> <source>.db next to the file; falls back to a numbered
@@ -285,6 +345,7 @@ fn open_in_dbx(params: &Value) -> Result<Value, PluginError> {
 
 fn db_info(params: &Value) -> Result<Value, PluginError> {
     let db_path = str_param(params, "path")?;
+    check_db_not_locked(db_path)?;
     let p = Path::new(db_path);
     if !p.is_file() {
         return Err(rpc_err("文件不存在".to_string()));
@@ -311,6 +372,37 @@ fn db_info(params: &Value) -> Result<Value, PluginError> {
     }))
 }
 
+/// Detects a live writer lock: if another process (e.g. DBX) holds the
+/// database open for writing, an immutable read may serve a stale snapshot —
+/// surface a clear message instead.
+fn check_db_not_locked(db_path: &str) -> Result<(), PluginError> {
+    let p = Path::new(db_path);
+    if !p.is_file() {
+        return Ok(()); // missing file handled by the caller
+    }
+    // A write-mode SQLite open + BEGIN IMMEDIATE acquires the same lock a
+    // live writer (e.g. DBX) holds; busy here means "in use elsewhere".
+    let conn = match rusqlite::Connection::open(p) {
+        Ok(c) => c,
+        Err(e) if e.to_string().contains("unable to open") => {
+            return Err(rpc_err("该数据库正在被其他程序使用（可能是 DBX 已打开该连接）。请先关闭对应连接再导出。".to_string()))
+        }
+        Err(_) => return Ok(()),
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+    match conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;") {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("locked") || msg.contains("busy") {
+                Err(rpc_err("该数据库正在被其他程序使用（可能是 DBX 已打开该连接）。请先关闭对应连接再导出。".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Read-only + immutable URI: avoids creating/touching WAL sidecar files of
 /// databases that may be open in DBX right now.
 fn open_sqlite_readonly(db_path: &str) -> Result<rusqlite::Connection, PluginError> {
@@ -333,6 +425,7 @@ fn export(params: &Value) -> Result<Value, PluginError> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default();
+    check_db_not_locked(db_path)?;
     let conn = open_sqlite_readonly(db_path)?;
     let listed = list_tables(&conn).map_err(rpc_err)?;
     let chosen: Vec<String> = if tables.is_empty() {
@@ -359,9 +452,12 @@ fn export(params: &Value) -> Result<Value, PluginError> {
     if chosen.is_empty() {
         return Err(rpc_err("没有可导出的表".to_string()));
     }
-    let out = export_xlsx(&conn, &chosen, XLSX_MAX_ROWS).map_err(rpc_err)?;
+    let (out, truncated) = export_xlsx_with_notes(&conn, &chosen, XLSX_MAX_ROWS).map_err(rpc_err)?;
     let (bytes, file_name) = (out, format!("{}.xlsx", safe_name(&file_stem(db_path))));
     let _ = format;
+    if truncated > 0 {
+        warnings.push(format!("有 {truncated} 个单元格超过 Excel 单元格 32,767 字符上限，已截断保留前 32,000 字符"));
+    }
     let out_dir = Path::new(&db_path).parent().unwrap_or(Path::new(".")).to_path_buf();
     let out_path = unique_path(out_dir.join(&file_name));
     std::fs::write(&out_path, &bytes).map_err(|e| rpc_err(format!("写出文件失败: {e}")))?;

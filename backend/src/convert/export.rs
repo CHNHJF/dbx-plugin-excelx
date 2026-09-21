@@ -6,7 +6,7 @@ use super::names::{quote_ident, sanitize_sheet_label};
 
 pub const XLSX_MAX_ROWS: usize = 1_048_576;
 
-fn read_table(conn: &Connection, table: &str, max_rows: usize) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+fn read_table(conn: &Connection, table: &str, max_rows: usize) -> Result<(Vec<String>, Vec<Vec<String>>, Vec<ColKind>), String> {
     let mut cols_stmt = conn
         .prepare(&format!("SELECT name FROM pragma_table_info({})", quote_ident(table)))
         .map_err(|e| e.to_string())?;
@@ -23,7 +23,9 @@ fn read_table(conn: &Connection, table: &str, max_rows: usize) -> Result<(Vec<St
     let mut stmt = conn.prepare(&select).map_err(|e| e.to_string())?;
     let n_cols = headers.len();
     let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut kinds: Vec<ColKind> = vec![ColKind::Integer; n_cols]; // neutral start; Null merges keep it
     let mut rs = stmt.query([]).map_err(|e| format!("读取表 {table} 失败: {e}"))?;
+    let mut scanned = 0usize;
     while let Some(row) = rs.next().map_err(|e| e.to_string())? {
         if rows.len() >= max_rows {
             break;
@@ -31,6 +33,17 @@ fn read_table(conn: &Connection, table: &str, max_rows: usize) -> Result<(Vec<St
         let mut out = Vec::with_capacity(n_cols);
         for i in 0..n_cols {
             let v = row.get_ref(i).map_err(|e| e.to_string())?;
+            if scanned < KIND_PROBE_ROWS {
+                let kind = match v {
+                    rusqlite::types::ValueRef::Null => None,
+                    rusqlite::types::ValueRef::Integer(_) => Some(ColKind::Integer),
+                    rusqlite::types::ValueRef::Real(_) => Some(ColKind::Real),
+                    _ => Some(ColKind::Text),
+                };
+                if let Some(k) = kind {
+                    kinds[i] = kinds[i].merge(k);
+                }
+            }
             out.push(match v {
                 rusqlite::types::ValueRef::Null => String::new(),
                 rusqlite::types::ValueRef::Integer(i) => i.to_string(),
@@ -45,13 +58,35 @@ fn read_table(conn: &Connection, table: &str, max_rows: usize) -> Result<(Vec<St
                 rusqlite::types::ValueRef::Blob(b) => format!("<{} bytes>", b.len()),
             });
         }
+        scanned += 1;
         rows.push(out);
     }
-    Ok((headers, rows))
+    Ok((headers, rows, kinds))
 }
 
+/// Output cell kind per column, probed from actual stored values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColKind {
+    Text,
+    Integer,
+    Real,
+}
+
+impl ColKind {
+    fn merge(self, other: Self) -> Self {
+        use ColKind::*;
+        match (self, other) {
+            (Text, _) | (_, Text) => Text,
+            (Integer, Integer) => Integer,
+            _ => Real,
+        }
+    }
+}
+
+const KIND_PROBE_ROWS: usize = 200;
+
 pub fn export_csv(conn: &Connection, table: &str, max_rows: usize) -> Result<String, String> {
-    let (headers, rows) = read_table(conn, table, max_rows)?;
+    let (headers, rows, _) = read_table(conn, table, max_rows)?;
     let mut wtr = csv::Writer::from_writer(vec![]);
     wtr.write_record(&headers).map_err(|_| "写入表头失败".to_string())?;
     for r in rows {
@@ -69,11 +104,16 @@ pub fn csv_with_bom(csv: &str) -> Vec<u8> {
     v
 }
 
-pub fn export_xlsx(conn: &Connection, tables: &[String], max_rows: usize) -> Result<Vec<u8>, String> {
+/// Excel's per-cell character limit; anything longer is truncated with a
+/// note instead of failing the export.
+const CELL_CHAR_LIMIT: usize = 32_000;
+
+pub fn export_xlsx_with_notes(conn: &Connection, tables: &[String], max_rows: usize) -> Result<(Vec<u8>, usize), String> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let mut used_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut truncated_cells = 0usize;
     for table in tables {
-        let (headers, rows) = read_table(conn, table, max_rows)?;
+        let (headers, rows, kinds) = read_table(conn, table, max_rows)?;
         let mut label = sanitize_sheet_label(table);
         let mut n = 2;
         while used_labels.contains(&label) {
@@ -88,19 +128,50 @@ pub fn export_xlsx(conn: &Connection, tables: &[String], max_rows: usize) -> Res
         }
         for (ri, row) in rows.iter().enumerate() {
             for (ci, cell) in row.iter().enumerate() {
-                ws.write_string((ri + 1) as u32, ci as u16, cell)
-                    .map_err(|e| format!("写入单元格失败: {e}"))?;
+                let r = (ri + 1) as u32;
+                let c = ci as u16;
+                // Excel's hard per-cell limit; truncate with a marker instead
+                // of failing the whole export.
+                let cell_text: &str = if cell.chars().count() > CELL_CHAR_LIMIT {
+                    truncated_cells += 1;
+                    &cell[..cell.char_indices().nth(CELL_CHAR_LIMIT).map(|(i, _)| i).unwrap_or(cell.len())]
+                } else {
+                    cell
+                };
+                // Numeric columns become real numbers so Excel can compute on
+                // them; anything unparsable falls back to the exact text.
+                match kinds.get(ci).copied().unwrap_or(ColKind::Text) {
+                    ColKind::Integer => match cell_text.parse::<i64>() {
+                        Ok(v) => ws.write_number(r, c, v as f64),
+                        Err(_) => ws.write_string(r, c, cell_text),
+                    },
+                    ColKind::Real => {
+                        let cleaned: String = cell_text.chars().filter(|ch| *ch != ',').collect();
+                        match cleaned.parse::<f64>() {
+                            Ok(v) => ws.write_number(r, c, v),
+                            Err(_) => ws.write_string(r, c, cell_text),
+                        }
+                    }
+                    ColKind::Text => ws.write_string(r, c, cell_text),
+                }
+                .map_err(|e| format!("写入单元格失败: {e}"))?;
             }
         }
     }
-    wb.save_to_buffer().map_err(|e| format!("生成 xlsx 失败: {e}"))
+    let bytes = wb.save_to_buffer().map_err(|e| format!("生成 xlsx 失败: {e}"))?;
+    Ok((bytes, truncated_cells))
+}
+
+/// Backward-compatible wrapper.
+pub fn export_xlsx(conn: &Connection, tables: &[String], max_rows: usize) -> Result<Vec<u8>, String> {
+    export_xlsx_with_notes(conn, tables, max_rows).map(|(b, _)| b)
 }
 
 /// CSV-specific problem scan for the pre-export check: actionable findings
 /// for content that cannot round-trip cleanly through CSV.
 pub fn csv_export_warnings(conn: &Connection, table: &str) -> Vec<String> {
     let mut warnings = Vec::new();
-    let (headers, _rows) = match read_table(conn, table, 1) {
+    let (headers, _rows, _) = match read_table(conn, table, 1) {
         Ok(v) => v,
         Err(e) => {
             warnings.push(e);
@@ -154,10 +225,11 @@ mod tests {
             ],
             inferred_types: vec![ColType::Text, ColType::Real],
             skipped_header_rows: 0,
+            hidden: false,
         };
         let planned = build_plans(std::slice::from_ref(&sheet), &[]);
         let conn = Connection::open_in_memory().unwrap();
-        write_database(&conn, &planned, "t.xlsx", |_, _| {}).unwrap();
+        write_database(&conn, &planned, "t.xlsx", |_| {}).unwrap();
         conn
     }
 
@@ -176,6 +248,15 @@ mod tests {
         let bytes = export_xlsx(&conn, &["订单".to_string()], 1000).unwrap();
         assert_eq!(&bytes[..2], b"PK"); // xlsx is a zip
         assert!(bytes.len() > 500);
+        // numeric column must be real numbers, not inline strings
+        let f = std::env::temp_dir().join("exl_numcheck.xlsx");
+        std::fs::write(&f, &bytes).unwrap();
+        let mut book = calamine::open_workbook_auto(&f).unwrap();
+        use calamine::Reader;
+        let range = book.worksheet_range("订单").unwrap();
+        let cell = range.get((1, 1)).unwrap(); // first data row, 金额 column
+        assert!(matches!(cell, calamine::Data::Float(_)), "金额 should be numeric, got {cell:?}");
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
@@ -183,6 +264,16 @@ mod tests {
         let conn = db_with_order_table();
         let csv = export_csv(&conn, "订单", 1).unwrap();
         assert_eq!(csv.lines().count(), 2); // header + 1 row
+    }
+
+    #[test]
+    fn oversized_cells_truncated_not_failed() {
+        let conn = Connection::open_in_memory().unwrap();
+        let big = "长".repeat(40_000);
+        conn.execute_batch(&format!("CREATE TABLE t (txt TEXT); INSERT INTO t VALUES ('{big}');")).unwrap();
+        let (bytes, truncated) = export_xlsx_with_notes(&conn, &["t".to_string()], 10).unwrap();
+        assert_eq!(truncated, 1);
+        assert!(!bytes.is_empty());
     }
 
     #[test]
