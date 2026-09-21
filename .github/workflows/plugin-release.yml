@@ -16,3 +16,5 @@ jobs:
       package-path: dist/*.dbxp
       metadata-path: dist/*.artifact.json
       plugin-cli-version: 0.1.9
+      build-matrix: >-
+        {"include":[{"runner":"windows-2022","target":"windows-x64"}]}
