@@ -25,9 +25,29 @@ pub const CONN_PREFIX: &str = "ExcelX ";
 pub const CONN_COLOR: &str = "#1d6a40";
 
 pub fn dbx_data_dir() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    let dir = Path::new(&appdata).join("com.dbx.app");
-    dir.join("dbx.db").is_file().then_some(dir)
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").ok()?;
+        let dir = Path::new(&appdata).join("com.dbx.app");
+        dir.join("dbx.db").is_file().then_some(dir)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Mirrors DBX's data_dir.rs default (Tauri app_data_dir):
+        // ~/Library/Application Support/com.dbx.app. Custom DBX_DATA_DIR wins
+        // on both platforms; the portable-mode marker is Windows-only upstream.
+        if let Ok(custom) = std::env::var("DBX_DATA_DIR") {
+            let dir = PathBuf::from(custom);
+            return dir.join("dbx.db").is_file().then_some(dir);
+        }
+        let home = std::env::var("HOME").ok()?;
+        let dir = Path::new(&home).join("Library/Application Support/com.dbx.app");
+        dir.join("dbx.db").is_file().then_some(dir)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 pub fn bridge_port(data_dir: &Path) -> Option<u16> {

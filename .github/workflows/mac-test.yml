@@ -1,0 +1,44 @@
+name: macOS tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    name: cargo test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Fetch plugin-cli SDK
+        run: |
+          cd "$(mktemp -d)"
+          npm init -y >/dev/null
+          npm install @dbx-app/plugin-cli@0.1.9 >/dev/null
+          SDK="$(find node_modules -type d -name dbx-plugin-sdk -path '*sdk-root*' | head -1)"
+          echo "SDK_DIR=$(pwd)/$SDK" >> "$GITHUB_ENV"
+      - name: cargo test
+        working-directory: backend
+        env:
+          DBX_PLUGIN_SDK_ROOT: ${{ env.SDK_DIR && format('{0}/../..', env.SDK_DIR) || '' }}
+        run: |
+          # dbx-plugin-sdk path dep expects sdk-root/plugins/sdk/rust/dbx-plugin-sdk
+          CARGO_SDK="$(dirname "$(dirname "$SDK_DIR")")"
+          sed -i.bak "s#path = \"C:/Users/Administrator/AppData/Local/npm-cache/_npx/[^\"]*\"#path = \"$CARGO_SDK\"#" Cargo.toml || true
+          rm -f Cargo.toml.bak
+          cat Cargo.toml | grep dbx-plugin-sdk || true
+          cargo test
+      - name: build + handshake smoke
+        working-directory: backend
+        run: |
+          cargo build --release
+          echo '{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}' | ./target/release/dbx-plugin-excelx | head -c 200

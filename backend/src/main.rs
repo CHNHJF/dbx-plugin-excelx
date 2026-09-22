@@ -100,6 +100,63 @@ fn spawn_dialog(emitter: PluginEmitter, event: &'static str, title: &'static str
 }
 
 fn native_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return mac_dialog_pick(title, filter, multiselect);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return win_dialog_pick(title, filter, multiselect);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (title, filter, multiselect);
+        Err("此平台暂不支持文件选择对话框".to_string())
+    }
+}
+
+/// macOS: system file picker via osascript. Output is plain UTF-8 (POSIX
+/// paths, one per line), so no GBK-style round trip is needed.
+#[cfg(target_os = "macos")]
+fn mac_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Vec<String>, String> {
+    // Translate the Windows filter syntax ("Name|*.a;*.b|Name2|*.c") into a
+    // choose-file type list ({"public.plain-text", "com.microsoft.excel.xls"}).
+    let exts: Vec<String> = filter
+        .split('|')
+        .skip(1)
+        .step_by(2)
+        .flat_map(|group| group.split(';'))
+        .filter_map(|pat| pat.trim().strip_prefix("*."))
+        .map(|e| e.to_string())
+        .collect();
+    let choose = if multiselect { "choose file with multiple selections allowed" } else { "choose file" };
+    let types = if exts.is_empty() {
+        String::new()
+    } else {
+        let list = exts.iter().map(|e| format!("\"public.{e}\"")).collect::<Vec<_>>().join(", ");
+        format!(" of type {{{list}}}")
+    };
+    // Single quotes in the title would break AppleScript quoting; strip them.
+    let title_clean = title.replace(char::from(39), char::from(32));
+    let script = format!("try\n{choose}{types} with prompt \"{title_clean}\"\non error number -128\n\treturn \"\"\nend try");
+    let out = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("启动文件选择对话框失败: {e}"))?;
+    if !out.status.success() {
+        return Err("文件选择对话框无法运行".to_string());
+    }
+    // AppleScript list/alias text: strip quotes/commas, keep POSIX paths.
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    Ok(text
+        .lines()
+        .map(|l| l.trim().trim_matches(['"', ',']).to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn win_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Vec<String>, String> {
     // PowerShell + Windows Forms file dialog; STA is required for dialogs.
     // Title text is ASCII-safe by construction (callers pass literals).
     //
@@ -496,7 +553,13 @@ fn open_folder(params: &Value) -> Result<Value, PluginError> {
     let path = str_param(params, "path")?;
     let target = Path::new(path);
     let dir = if target.is_dir() { target } else { target.parent().unwrap_or(Path::new(".")) };
-    std::process::Command::new("explorer")
+    #[cfg(target_os = "windows")]
+    let opener = ("explorer", None::<&str>);
+    #[cfg(target_os = "macos")]
+    let opener = ("open", None::<&str>);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let opener = ("xdg-open", None::<&str>);
+    std::process::Command::new(opener.0)
         .arg(dir)
         .spawn()
         .map_err(|e| rpc_err(format!("打开文件夹失败: {e}")))?;

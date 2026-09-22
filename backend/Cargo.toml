@@ -1,6 +1,6 @@
 [package]
 name = "dbx-plugin-excelx"
-version = "0.9.7"
+version = "0.9.8-beta.1"
 edition = "2021"
 license = "Apache-2.0"
 

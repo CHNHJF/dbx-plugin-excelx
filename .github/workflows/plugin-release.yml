@@ -17,4 +17,4 @@ jobs:
       metadata-path: dist/*.artifact.json
       plugin-cli-version: 0.1.9
       build-matrix: >-
-        {"include":[{"runner":"windows-2022","target":"windows-x64"}]}
+        {"include":[{"runner":"windows-2022","target":"windows-x64"},{"runner":"macos-15","target":"darwin-arm64"},{"runner":"macos-15-intel","target":"darwin-x64"}]}
