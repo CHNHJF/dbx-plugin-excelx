@@ -47,8 +47,8 @@ AI 会自动写 SQL、执行并给出答案——不需要懂任何数据库知�
 
 ## 平台支持
 
-- **Windows x64** — 正式支持（商店上架版本）
-- **macOS (Apple Silicon / Intel)** — **beta**：文件选择使用系统 osascript，DBX 数据目录遵循 `~/Library/Application Support`。已在 GitHub Actions 的 macOS 环境跑过全量单元与端到端测试，但尚未在真机上完成完整人工验收——欢迎 Mac 用户试用并反馈问题（[issues](../../issues)）
+- **Windows x64** — 正式支持
+- **macOS (Apple Silicon / Intel)** — 正式支持：文件选择使用系统 osascript，DBX 数据目录遵循 `~/Library/Application Support`
 
 Linux 暂不支持。
 
