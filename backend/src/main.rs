@@ -137,7 +137,7 @@ fn mac_dialog_pick(title: &str, filter: &str, multiselect: bool) -> Result<Vec<S
         format!(" of type {{{list}}}")
     };
     // Single quotes in the title would break AppleScript quoting; strip them.
-    let title_clean = title.replace(char::from(39), char::from(32));
+    let title_clean = title.replace(char::from(39), " ");
     let script = format!("try\n{choose}{types} with prompt \"{title_clean}\"\non error number -128\n\treturn \"\"\nend try");
     let out = std::process::Command::new("osascript")
         .args(["-e", &script])
