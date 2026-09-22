@@ -7,7 +7,7 @@ license = "Apache-2.0"
 [workspace]
 
 [dependencies]
-dbx-plugin-sdk = { path = "../vendor/dbx-plugin-sdk" }
+dbx-plugin-sdk = "0.1.0"
 serde_json = "1"
 calamine = "0.30"
 zip = { version = "4.2.0", features = ["deflate"], default-features = false }
@@ -24,3 +24,6 @@ chrono = "0.4"
 strip = true
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+dbx-plugin-sdk = { path = "../vendor/dbx-plugin-sdk" }
