@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.github.chnhjf.excelx",
   "name": "ExcelX",
-  "version": "0.9.8-beta.1",
+  "version": "0.9.8",
   "publisher": "chnhjf",
   "description": "Convert spreadsheets (xlsx/xls/csv) to SQLite databases and back.",
   "icon": "assets/plugin.svg",

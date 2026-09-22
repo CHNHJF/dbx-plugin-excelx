@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-plugin-excelx"
-version = "0.9.8-beta.1"
+version = "0.9.8"
 dependencies = [
  "calamine",
  "chrono",
