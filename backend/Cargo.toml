@@ -7,7 +7,7 @@ license = "Apache-2.0"
 [workspace]
 
 [dependencies]
-dbx-plugin-sdk = "0.1.0"
+dbx-plugin-sdk = { path = "../vendor/dbx-plugin-sdk" }
 serde_json = "1"
 calamine = "0.30"
 zip = "2"
