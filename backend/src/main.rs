@@ -1154,12 +1154,11 @@ mod tests {
         assert_eq!(staged_display_stem(staged.to_str().unwrap()), "report");
         let out = default_output_candidate(staged.to_str().unwrap());
         assert_eq!(out, documents_dir().unwrap().join("ExcelX").join("report.db"));
-        // regular files stay beside the source
-        assert!(!is_staged_source("C:\\data\\a.xlsx"));
-        assert_eq!(
-            default_output_candidate("C:\\data\\a.xlsx"),
-            Path::new("C:\\data").join("a.db")
-        );
+        // regular files stay beside the source (build the expected path with
+        // PathBuf so the separator is platform-correct).
+        let regular = std::env::temp_dir().join("data").join("a.xlsx");
+        assert!(!is_staged_source(regular.to_str().unwrap()));
+        assert_eq!(default_output_candidate(regular.to_str().unwrap()), std::env::temp_dir().join("data").join("a.db"));
         // a stem that merely contains a dash is not a staged size suffix
         assert_eq!(staged_display_stem("C:\\x\\sales-2024-q1.xlsx"), "sales-2024-q1");
     }
