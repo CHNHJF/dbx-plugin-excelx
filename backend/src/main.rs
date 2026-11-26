@@ -1089,17 +1089,29 @@ mod tests {
     }
 
     /// macOS CI only: prove the generated AppleScript actually compiles and
-    /// runs headlessly on a real system. `choose file` is swapped for `{}`
-    /// so no dialog blocks the runner; everything else (try/on error,
-    /// list coercion, POSIX path loop) executes for real. Also proves the
-    /// POSIX-path statement returns what the picker relies on.
+    /// runs headlessly on a real system. The interactive `choose file …`
+    /// statement is replaced by an empty list, so no dialog blocks the
+    /// runner; everything else (try/on error, list coercion, POSIX path
+    /// loop) executes for real. Also proves the POSIX-path statement returns
+    /// what the picker relies on.
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_picker_script_compiles_and_runs_headless() {
         let script = mac_pick_script("选择要转换的表格", "Spreadsheets|*.xlsx;*.csv|All files|*.*", true);
+        // Replace the WHOLE `set pickedFiles to choose file … of type {…}`
+        // statement — leaving `… of type {…}` after `{}` is a syntax error.
         let headless = script
-            .replace("choose file with multiple selections allowed", "{}")
-            .replace("choose file", "{}");
+            .lines()
+            .map(|line| {
+                if line.contains("set pickedFiles to choose file") {
+                    "\tset pickedFiles to {}".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!headless.contains("choose file"), "stub failed:\n{headless}");
         let path = std::env::temp_dir().join("excelx-picker-headless.applescript");
         std::fs::write(&path, &headless).unwrap();
         let out = std::process::Command::new("osascript").arg(&path).output().expect("osascript present");
@@ -1109,6 +1121,17 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
+
+        // Also compile the REAL script (dialog included) without running it:
+        // `osasscript` compiles a script file before executing, and a syntax
+        // error is reported even when we never reach the dialog. We can't run
+        // it (it blocks), so compile via `run script`-free path: use
+        // `osascript -e 'compile'`-equivalent by checking the parse error
+        // of the full text with a non-executing `STORE` — simplest reliable
+        // form is `osascript -e "compile" ` which is not available, so we
+        // rely on the stub above for semantics and on brace/quote balance
+        // (checked cross-platform in mac_picker_uses_only_real_utis) for the
+        // dialog line itself.
 
         // The POSIX conversion statement on a real file with a non-ASCII name.
         let f = std::env::temp_dir().join("excelx posix 测试.csv");
