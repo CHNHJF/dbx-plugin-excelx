@@ -1,17 +1,19 @@
-name: macOS tests
+name: Backend tests
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
 
 jobs:
-  macos:
+  test:
     name: cargo test (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel]
+        # windows-x64 is the most-installed target; macos covers both the
+        # osascript file picker paths (arm64 + Intel).
+        runner: [windows-2022, macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +23,7 @@ jobs:
         run: cargo test
       - name: build + handshake smoke
         working-directory: backend
+        shell: bash
         run: |
           cargo build --release
           echo '{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}' | ./target/release/dbx-plugin-excelx | head -c 200
