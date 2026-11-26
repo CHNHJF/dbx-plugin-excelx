@@ -215,6 +215,12 @@
       .col-stat { color: var(--muted-fg); font-size: 10.5px; font-weight: 400; margin-top: 2px; white-space: nowrap; }
       .hint { background: var(--muted); border-radius: var(--r-md); padding: 10px 12px; margin-bottom: 12px; color: var(--muted-fg); font-size: 12.5px; }
       .hint b { color: var(--fg); font-weight: 600; }
+      .paste-row { display: flex; gap: 6px; justify-content: center; margin: 12px auto 0; max-width: 520px; }
+      .paste-row input { flex: 1; min-width: 0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+      .drop.dragging { border-color: #1d6a40; background: color-mix(in srgb, #1d6a40 8%, transparent); }
+      .drop.dragging .t::after { content: "　— 松开即可导入"; color: #1d6a40; }
+      #pick-status { text-align: left; max-width: 520px; margin: 10px auto 0; }
+      #pick-status.err { background: color-mix(in srgb, var(--destructive) 8%, transparent); color: var(--destructive); }
     </style>
   </head>
   <body>
@@ -235,11 +241,19 @@
       <!-- ==================== 导入 ==================== -->
       <div id="tab-import">
         <div id="pick-view">
-          <div class="drop">
+          <div class="drop" id="drop-zone">
             <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
             <div class="t">选择一个表格文件</div>
-            <div class="d">Excel / CSV 均可，编码自动识别</div>
-            <button class="primary" id="pick-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>选择文件</button>
+            <div class="d">Excel / CSV 均可，编码自动识别；也可以把文件拖进来</div>
+            <div class="row" style="justify-content:center;">
+              <button class="primary" id="pick-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>选择文件</button>
+              <button id="pick-btn-host" title="使用 DBX 自带的文件选择器" hidden>备用选择器</button>
+            </div>
+            <div class="paste-row">
+              <input type="text" id="paste-path" placeholder="或粘贴文件完整路径，例如 C:\Users\me\Desktop\销售.xlsx" spellcheck="false" />
+              <button class="small" id="paste-go">打开</button>
+            </div>
+            <div id="pick-status" class="banner warn" hidden></div>
           </div>
           <div class="steps3">
             <div class="step">
@@ -264,7 +278,7 @@
             </div>
           </div>
           <div class="hint">
-            <b>本地转换</b>　数据不出电脑，生成的 .db 和原文件在同一文件夹。
+            <b>本地转换</b>　数据不出电脑，生成的 .db 默认和原文件在同一文件夹（拖入/备用选择器导入的文件会放到「文档\ExcelX」）。
           </div>
         </div>
 
@@ -390,6 +404,7 @@
             <div id="export-warnings"></div>
             <div class="row" style="margin-top:12px;">
               <button class="primary" id="btn-export-xlsx" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出 XLSX</button>
+              <button id="btn-export-csv" disabled title="每张表一个 CSV 文件（UTF-8 带 BOM，Excel 可直接打开），没有行数上限"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>导出 CSV</button>
             </div>
           </div>
           <div id="export-result" class="card" hidden>
@@ -397,7 +412,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
               <div class="body"><div class="lead">已导出</div></div>
             </div>
-            <div class="pathbox"><span class="muted">文件</span><span class="mono" id="export-path"></span><button class="small ghost" id="btn-copy-export">复制</button></div>
+            <div id="export-paths"></div>
             <div class="row">
               <button id="btn-export-folder">打开文件夹</button>
               <button class="ghost" id="btn-export-again">继续导出</button>
@@ -410,7 +425,7 @@
     <script>
       const state = {
         path: "", sheets: [], activeSheet: 0, plans: [], lastDb: null,
-        dbPath: "", dbTables: [], _from: "pick-view",
+        dbPath: "", dbTables: [], _from: "pick-view", headerRow: null, headerRowAuto: null,
       };
       const $ = (id) => document.getElementById(id);
 
@@ -447,36 +462,145 @@
           });
         });
 
-      $("pick-btn").addEventListener("click", async () => {
+      $("pick-btn").addEventListener("click", () => pickNative(true));
+      $("pick-btn-host").addEventListener("click", () => pickViaHost());
+      $("paste-go").addEventListener("click", openPastedPath);
+      $("paste-path").addEventListener("keydown", (e) => { if (e.key === "Enter") openPastedPath(); });
+
+      function pickStatus(msg, isError) {
+        const box = $("pick-status");
+        if (!msg) { box.hidden = true; box.innerHTML = ""; return; }
+        box.hidden = false;
+        box.className = "banner " + (isError ? "err" : "warn");
+        box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${isError ? '<circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/>' : '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/>'}</svg><div class="body">${esc(msg)}</div>`;
+      }
+
+      // Primary path: the sidecar opens the OS dialog and reports back via the
+      // `excelx/pickFilesDone` event (the dialog can outlive the bridge's
+      // 120s invoke cap, so the RPC only launches it). If the dialog cannot
+      // run at all, fall back to the host's own picker instead of dead-ending.
+      async function pickNative(showFallback) {
+        pickStatus("", false);
         const r = await waitForPick("excelx/pickFiles", "excelx/pickFilesDone");
-        if (!r || r.error) { if (r && r.error) showImportError(r.error); return; }
+        if (!r) return;
+        if (r.error) {
+          pickStatus("系统文件选择框启动失败：" + r.error + "　已切换为备用选择器。", true);
+          $("pick-btn-host").hidden = false;
+          if (showFallback) return pickViaHost();
+          return;
+        }
         if (r.cancelled) return;
         const paths = r.paths || [];
-        if (paths.length > 1) showImportError("一次请转换一个文件：\n" + paths.join("\n"));
+        if (paths.length > 1) pickStatus("一次请转换一个文件：\n" + paths.join("\n"), true);
         else if (paths.length === 1) analyze(paths[0]);
-      });
+      }
+
+      // Fallback: the host's fileTransfer picker (no real path — bytes are
+      // streamed to the sidecar in chunks and materialised in a staging dir).
+      // Keeps the plugin usable when the native dialog is blocked (policy,
+      // missing PowerShell, future host changes) or on hosts that provide
+      // only this API.
+      async function pickViaHost() {
+        const ft = window.dbxPlugin && window.dbxPlugin.fileTransfer;
+        if (!ft || typeof ft.pick !== "function") {
+          pickStatus("当前 DBX 版本没有提供备用文件选择器，请把文件完整路径粘贴到下方输入框。", true);
+          return;
+        }
+        pickStatus("请选择文件（备用选择器）…", false);
+        let files;
+        try {
+          files = await ft.pick({ multiple: false });
+        } catch (e) {
+          pickStatus("备用选择器打开失败：" + String((e && e.message) || e) + "　请粘贴文件路径。", true);
+          return;
+        }
+        if (!files || !files.length) { pickStatus("", false); return; }
+        await ingestHandle(files[0]);
+      }
+
+      // Streams one host file handle into the sidecar via `excelx/ingestFile`
+      // (base64 chunks ≤ 6 MiB raw to stay under the host's 8 MiB param cap).
+      async function ingestHandle(file) {
+        const CHUNK = 6 * 1024 * 1024;
+        const size = Number(file.size || 0);
+        const name = file.name || "dropped.xlsx";
+        if (size > 200 * 1024 * 1024) {
+          pickStatus(`「${name}」有 ${(size / 1048576).toFixed(0)} MB，备用方式只支持 200 MB 以内的文件，请用「选择文件」或粘贴路径。`, true);
+          return;
+        }
+        show("progress-view");
+        $("progress-label").textContent = `正在读取 ${name}`;
+        $("progress-bar").style.width = "5%";
+        try {
+          let offset = 0;
+          let result = null;
+          // Loop on "eof", not on a predicted chunk count: the host may return
+          // shorter chunks than requested, and size may be unknown (0).
+          for (let guard = 0; guard < 100000; guard++) {
+            const len = size > offset ? Math.min(CHUNK, size - offset) : CHUNK;
+            const chunk = await window.dbxPlugin.fileTransfer.read(file.handleId, offset, len);
+            const raw = base64ToBytes(chunk.dataBase64 || "");
+            if (raw.length) {
+              // offset is the RAW BYTE offset of this chunk (backend contract).
+              result = await invoke("excelx/ingestFile", { name, dataBase64: chunk.dataBase64 || "", offset, totalSize: size });
+              offset += raw.length;
+            }
+            const pct = size ? Math.min(90, 5 + Math.round((offset / size) * 85)) : 50;
+            $("progress-bar").style.width = pct + "%";
+            $("progress-label").textContent = `正在读取 ${name} · ${(offset / 1048576).toFixed(1)} MB`;
+            if (chunk.eof || (size && offset >= size) || !raw.length) break;
+          }
+          if (!result || !result.sheets) throw new Error((result && result.error) || "文件读取不完整，请改用「选择文件」或粘贴路径");
+          applyAnalysis(result.path, result);
+        } catch (e) {
+          showImportError("读取文件失败：" + String((e && e.message) || e));
+        }
+      }
+
+      function base64ToBytes(b64) {
+        const bin = atob(b64 || "");
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }
+
+      function openPastedPath() {
+        const raw = ($("paste-path").value || "").trim();
+        if (!raw) return;
+        const p = raw.replace(/^"|"$/g, "").trim();
+        pickStatus("", false);
+        analyze(p);
+      }
 
       function analyze(path) {
         show("progress-view");
         $("progress-label").textContent = "正在分析 " + path.split(/[\\/]/).pop();
         $("progress-bar").style.width = "8%";
         invoke("excelx/analyze", { path }).then(
-          (r) => {
-            state.path = path;
-            state.sheets = r.sheets || [];
-            state.plans = state.sheets.map((s) => ({
-              tableName: s.label,
-              columnTypes: (s.inferredTypes || []).slice(),
-              skipColumns: [],
-              primaryKey: null,
-              enabled: !s.hidden, // hidden sheets opt-in only
-            }));
-            state.activeSheet = firstEnabledSheet();
-            renderPreview();
-            show("preview-view");
-          },
-          (e) => showImportError(String(e.message || e))
+          (r) => applyAnalysis(path, r),
+          (e) => {
+            show("pick-view");
+            pickStatus(String(e.message || e), true);
+            if (/无法|失败|找不到|not found|dialog|对话框/i.test(String(e.message || e))) $("pick-btn-host").hidden = false;
+          }
         );
+      }
+
+      function applyAnalysis(path, r) {
+        state.path = path;
+        state.headerRow = null;
+        state.headerRowAuto = null;
+        state.sheets = r.sheets || [];
+        state.plans = state.sheets.map((s) => ({
+          tableName: s.label,
+          columnTypes: (s.inferredTypes || []).slice(),
+          skipColumns: [],
+          primaryKey: null,
+          enabled: !s.hidden, // hidden sheets opt-in only
+        }));
+        state.activeSheet = firstEnabledSheet();
+        renderPreview();
+        show("preview-view");
       }
 
       function renderPreview() {
@@ -485,15 +609,42 @@
         $("src-meta").textContent = `${state.sheets.length} 个工作表 · 每个 sheet 一张表`;
 
         const hr = $("header-row");
-        if (!hr.options.length) {
-          for (let i = 0; i <= 5; i++) {
+        // Offer 0..20 rows; a header buried deeper than that is rare, and
+        // the old fixed 0..5 range silently made such files un-convertible.
+        const hrMax = 20;
+        if (hr.options.length < hrMax + 1) {
+          hr.innerHTML = "";
+          for (let i = 0; i <= hrMax; i++) {
             const o = document.createElement("option");
             o.value = String(i);
             o.textContent = i === 0 ? "无表头" : `第 ${i} 行`;
             hr.appendChild(o);
           }
-          hr.value = "1";
-          hr.onchange = () => reanalyze(parseInt(hr.value, 10) || 0);
+          hr.value = state.headerRow == null ? "1" : String(state.headerRow);
+          hr.onchange = () => {
+            state.headerRow = parseInt(hr.value, 10) || 0;
+            reanalyze(state.headerRow);
+          };
+        }
+        // Auto-detect a header row when the first row looks like a title
+        // banner: a single non-empty cell followed by short text cells, with
+        // data types only appearing later. Only suggests; user decides.
+        if (state.headerRowAuto == null) {
+          state.headerRowAuto = detectHeaderRow(s);
+          if (state.headerRowAuto && state.headerRowAuto !== parseInt(hr.value || "1", 10)) {
+            const note = document.createElement("div");
+            note.className = "banner warn";
+            note.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4m0 4h.01"/></svg><div class="body">第 1 行看起来是标题而不是表头，<a href="#" id="hdr-suggest">把表头改为第 ${state.headerRowAuto} 行</a></div>`;
+            const pills = $("sheet-tabs");
+            pills.parentNode.insertBefore(note, pills.nextSibling);
+            note.querySelector("#hdr-suggest").addEventListener("click", (ev) => {
+              ev.preventDefault();
+              hr.value = String(state.headerRowAuto);
+              state.headerRow = state.headerRowAuto;
+              note.remove();
+              reanalyze(state.headerRow);
+            });
+          }
         }
 
         const tabs = $("sheet-tabs");
@@ -678,18 +829,21 @@
       function reanalyze(headerRow) {
         show("progress-view");
         $("progress-label").textContent = "按新表头行重新解析";
+        $("progress-bar").style.width = "15%";
         invoke("excelx/analyze", { path: state.path, headerRow }).then(
           (r) => {
+            const keepEnabled = state.plans.map((p) => p.enabled !== false);
             state.sheets = r.sheets || [];
-            state.plans = state.sheets.map((s) => ({
+            state.plans = state.sheets.map((s, i) => ({
               tableName: s.label,
               columnTypes: (s.inferredTypes || []).slice(),
               skipColumns: [],
               primaryKey: null,
-              enabled: !s.hidden,
+              enabled: keepEnabled.length === state.sheets.length ? keepEnabled[i] : !s.hidden,
             }));
             if (state.activeSheet >= state.sheets.length || state.plans[state.activeSheet].enabled === false)
               state.activeSheet = firstEnabledSheet();
+            state.headerRow = headerRow;
             renderPreview();
             show("preview-view");
           },
@@ -697,10 +851,23 @@
         );
       }
 
+      // Heuristic: the first non-empty row is a banner when exactly one cell
+      // holds text and the next row has ≥2 non-empty cells. Returns the
+      // 1-based index of the probable header row, or 1 to keep the default.
+      function detectHeaderRow(sheet) {
+        const rows = sheet.sampleRows || [];
+        if (!rows.length) return 1;
+        const count = (r) => (r || []).filter((c) => String(c == null ? "" : c).trim() !== "").length;
+        const first = count(rows[0]);
+        const second = rows[1] ? count(rows[1]) : 0;
+        if (first === 1 && second >= 2) return 2;
+        return 1;
+      }
+
       $("table-name").addEventListener("input", () => {
         state.plans[state.activeSheet].tableName = $("table-name").value;
       });
-      $("btn-back").addEventListener("click", () => show("pick-view"));
+      $("btn-back").addEventListener("click", () => { show("pick-view"); pickStatus("", false); });
       $("btn-convert").addEventListener("click", () => {
         // Re-convert flow: if the target .db already exists, confirm replace
         // (default) vs new copy — replaces the old _2/_3 pile-up behavior.
@@ -711,6 +878,16 @@
         );
       });
       function targetDbPath(srcPath) {
+        // Mirrors the backend: staged (streamed) sources land in
+        // Documents/ExcelX/<clean stem>.db, everything else beside the file.
+        const norm = srcPath.replace(/\\/g, "/");
+        if (/\/excelx-ingest\//i.test(norm) || /[\\/]excelx-ingest[\\/]/i.test(srcPath)) {
+          const base = (srcPath.split(/[\\/]/).pop() || "").replace(/\.[^.]+$/, "");
+          const stem = base.replace(/-\d+$/, "");
+          const docs = (navigator.platform && /mac/i.test(navigator.platform))
+            ? "~/Documents" : "Documents";
+          return `${docs}/ExcelX/${stem}.db`;
+        }
         const i = srcPath.lastIndexOf(".");
         return (i > 0 ? srcPath.slice(0, i) : srcPath) + ".db";
       }
@@ -774,6 +951,39 @@
           },
           (e) => showImportError(String(e.message || e))
         );
+      }
+
+      // Drag & drop through the host's fileTransfer API (bytes only; the host
+      // never hands absolute paths to plugin iframes). Visual drag state is
+      // also driven by the host so the drop zone highlights correctly.
+      (function setupDrop() {
+        const zone = $("drop-zone");
+        const ft = window.dbxPlugin && window.dbxPlugin.fileTransfer;
+        if (!ft) return;
+        if (typeof ft.onDragState === "function") {
+          ft.onDragState((active) => zone.classList.toggle("dragging", !!active));
+        }
+        if (typeof ft.onDrop === "function") {
+          ft.onDrop((files) => {
+            zone.classList.remove("dragging");
+            if (!files || !files.length) return;
+            if (files.length > 1) { pickStatus("一次请转换一个文件，已选取第一个：" + files[0].name, false); }
+            ingestHandle(files[0]);
+          });
+        }
+        window.addEventListener("dbx-plugin-dragstate", (e) => zone.classList.toggle("dragging", !!(e.detail && e.detail.active)));
+        window.addEventListener("dbx-plugin-filedrop", (e) => {
+          const files = (e.detail && e.detail.files) || [];
+          zone.classList.remove("dragging");
+          if (files.length) ingestHandle(files[0]);
+        });
+      })();
+
+      // Expose the fallback picker button up front when the host advertises
+      // fileTransfer but the native dialog is likely unavailable is decided at
+      // runtime; here we only make sure the button is usable when present.
+      if (window.dbxPlugin && window.dbxPlugin.fileTransfer && typeof window.dbxPlugin.fileTransfer.pick === "function") {
+        $("pick-btn-host").hidden = false;
       }
 
       // File-picker results arrive as events (the OS dialog can outlive the
@@ -907,7 +1117,6 @@
         invoke("excelx/openFolder", { path: state.lastDb.dbPath }).catch(() => {});
       });
       bindCopyInline("btn-copy-inline", () => state.lastDb.dbPath);
-      bindCopyInline("btn-copy-export", () => $("export-path").textContent);
       function bindCopyInline(id, getText) {
         const b = $(id);
         b.addEventListener("click", () => {
@@ -917,9 +1126,9 @@
           }).catch(() => {});
         });
       }
-      $("btn-again").addEventListener("click", () => show("pick-view"));
+      $("btn-again").addEventListener("click", () => { state.lastDb = null; show("pick-view"); pickStatus("", false); });
       $("btn-retry-back").addEventListener("click", () => show("preview-view"));
-      $("btn-back-home").addEventListener("click", () => show("pick-view"));
+      $("btn-back-home").addEventListener("click", () => { show("pick-view"); pickStatus("", false); });
 
       // ---------------- 导出 ----------------
       function loadConnections() {
@@ -1022,12 +1231,13 @@
       function refreshExportUi() {
         const sel = selectedTables();
         $("btn-export-xlsx").disabled = sel.length === 0;
+        $("btn-export-csv").disabled = sel.length === 0;
         const warnBox = $("export-warnings");
         warnBox.innerHTML = "";
         state.dbTables
           .filter((t) => sel.includes(t.name))
           .forEach((t) => {
-            if (t.overXlsxLimit) warnBox.appendChild(warnBanner(`表「${t.name}」超过 xlsx 单表 1,048,576 行上限，导出 xlsx 时将跳过`));
+            if (t.overXlsxLimit) warnBox.appendChild(warnBanner(`表「${t.name}」超过 xlsx 单表 1,048,576 行上限，导出 xlsx 时将跳过——请改用「导出 CSV」`));
             (t.csvWarnings || []).forEach((w) => warnBox.appendChild(warnBanner(w)));
           });
       }
@@ -1039,32 +1249,57 @@
       }
 
       $("btn-export-xlsx").addEventListener("click", () => doExport("xlsx"));
+      $("btn-export-csv").addEventListener("click", () => doExport("csv"));
       function doExport(format) {
         const tables = selectedTables();
         $("btn-export-xlsx").disabled = true;
+        $("btn-export-csv").disabled = true;
         invoke("excelx/export", { dbPath: state.dbPath, format, tables }).then(
           (r) => {
-            $("export-path").textContent = r.path;
-            const holder = $("export-result");
-            holder.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
-            const anchor = holder.querySelector(".banner.ok");
-            (r.warnings || []).forEach((w) => holder.insertBefore(warnBanner(w), anchor.nextSibling));
-            holder.hidden = false;
+            // One path box per file (CSV exports one file per table).
+            const holder = $("export-paths");
+            holder.innerHTML = "";
+            (r.paths || [r.path]).filter(Boolean).forEach((p) => {
+              const box = document.createElement("div");
+              box.className = "pathbox";
+              const label = document.createElement("span");
+              label.className = "muted";
+              label.textContent = format === "csv" ? "CSV" : "文件";
+              const span = document.createElement("span");
+              span.className = "mono";
+              span.textContent = p;
+              if (!$("export-path")) span.id = "export-path";
+              const copy = document.createElement("button");
+              copy.className = "small ghost";
+              copy.textContent = "复制";
+              copy.addEventListener("click", () => request("host.copy", { text: p }).then(() => {
+                copy.textContent = "已复制";
+                setTimeout(() => (copy.textContent = "复制"), 1400);
+              }).catch(() => {}));
+              box.appendChild(label); box.appendChild(span); box.appendChild(copy);
+              holder.appendChild(box);
+            });
+            state.lastExportPath = r.paths && r.paths.length > 1 ? r.paths[0].replace(/[\\/][^\\/]+$/, "") : (r.paths || [r.path])[0];
+            const result = $("export-result");
+            result.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
+            const anchor = result.querySelector(".banner.ok");
+            (r.warnings || []).forEach((w) => result.insertBefore(warnBanner(w), anchor.nextSibling));
+            result.hidden = false;
           },
           (e) => {
-            const holder = $("export-result");
-            holder.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
-            const anchor = holder.querySelector(".banner.ok");
+            const result = $("export-result");
+            result.querySelectorAll(".banner.warn, .banner.err").forEach((n) => n.remove());
+            const anchor = result.querySelector(".banner.ok");
             const d = document.createElement("div");
             d.className = "banner err";
             d.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg><div class="body">导出失败：${esc(String(e.message || e))}</div>`;
-            holder.insertBefore(d, anchor.nextSibling);
-            holder.hidden = false;
+            result.insertBefore(d, anchor.nextSibling);
+            result.hidden = false;
           }
-        );
+        ).finally(() => refreshExportUi());
       }
       $("btn-export-folder").addEventListener("click", () => {
-        const p = $("export-path").textContent;
+        const p = state.lastExportPath || ($("export-path") && $("export-path").textContent);
         if (p) invoke("excelx/openFolder", { path: p }).catch(() => {});
       });
       $("btn-export-again").addEventListener("click", () => { $("export-result").hidden = true; refreshExportUi(); });

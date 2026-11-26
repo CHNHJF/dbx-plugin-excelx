@@ -1,6 +1,6 @@
 {
   "name": "ExcelX",
-  "description": "Convert spreadsheets (xlsx/xls/csv) into SQLite databases and export them back, so anyone can query their data with SQL or the DBX AI assistant.",
+  "description": "Convert spreadsheets (xlsx/xls/csv) into SQLite databases and export them back to xlsx or csv, so anyone can query their data with SQL or the DBX AI assistant.",
   "icon": "assets/plugin.svg",
   "tags": [
     "spreadsheet",

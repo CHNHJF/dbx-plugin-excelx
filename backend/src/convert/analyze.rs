@@ -77,6 +77,12 @@ pub fn col_type_from_cells(cells: impl Iterator<Item = String>) -> ColType {
         if t.len() > 1 && t.starts_with('0') && t.chars().all(|c| c.is_ascii_digit()) {
             return ColType::Text;
         }
+        // Long all-digit runs (≥ 7 digits, no separators) are phone numbers,
+        // ID cards, tracking numbers... never quantities. Keep them TEXT so a
+        // 11-digit mobile number stays an exact string instead of a REAL.
+        if t.len() >= 7 && t.chars().all(|c| c.is_ascii_digit()) {
+            return ColType::Text;
+        }
         match parse_number_loose(t) {
             Some(v) if v.fract() == 0.0 && !t.contains(['.', 'e', 'E']) => saw_int = true,
             Some(_) => saw_real = true,
@@ -103,22 +109,73 @@ pub fn col_type_from_cells(cells: impl Iterator<Item = String>) -> ColType {
 /// separators and surrounding spaces; keeps sign and decimals. `001` still
 /// parses, which is why ID-like columns must be pinned to TEXT in the preview
 /// (documented behavior, not silent magic).
+///
+/// Comma handling is syntax-driven so both locales work without configuration:
+/// - `1,234` / `1,234,567.50` → thousands separators (groups of exactly 3)
+/// - `12,50` / `0,5` → decimal comma (European / Chinese-locale Excel exports
+///   with `;` field separators). Previously this became 1250 — a 100× error.
 fn parse_number_loose(t: &str) -> Option<f64> {
-    let cleaned: String = t.chars().filter(|c| *c != ',' && *c != '\u{a0}').collect();
+    let cleaned = normalise_number_text(t)?;
     if cleaned.is_empty() {
         return None;
     }
     cleaned.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// Rewrites a numeric cell into ASCII `.`-decimal form with no separators.
+/// Returns None for text that contains no digit.
+fn normalise_number_text(t: &str) -> Option<String> {
+    let t = t.trim().replace('\u{a0}', " ");
+    let t = t.trim();
+    if t.is_empty() || !t.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !t.contains(',') {
+        return Some(t.replace(' ', ""));
+    }
+    // Split off any exponent so the mantissa can be inspected alone.
+    let (mantissa, exponent) = match t.find(['e', 'E']) {
+        Some(i) if i > 0 && t[..i].chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '+')) => (&t[..i], t[i..].to_string()),
+        _ => (t, String::new()),
+    };
+    let sign_len = usize::from(mantissa.starts_with(['-', '+']));
+    let body = &mantissa[sign_len..];
+    // Inspect comma groups on the integer part only, so `1,234,567.50`'s
+    // last group is `567` (not `567.50`).
+    let int_part = match body.rfind('.') {
+        Some(d) if !body[..d].contains(',') || body[..d].rfind(',') < Some(d) => &body[..d],
+        _ => body,
+    };
+    let comma_groups: Vec<&str> = int_part.split(',').collect();
+    // `1,234` / `1,234,567` / `1,234,567.50`: every group after the first is
+    // exactly three digits → thousands separators. Any other comma shape is a
+    // decimal comma (`12,50`, `0,5`, `1,5e3`) or European dot-thousands
+    // (`1.234,56`), where the dot comes BEFORE the comma.
+    let thousands_shaped = comma_groups.len() > 1
+        && !comma_groups[0].is_empty()
+        && comma_groups[1..].iter().all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+        && body.rfind('.').map_or(true, |d| body.rfind(',').map_or(true, |c| c < d));
+    let cleaned: String = if thousands_shaped {
+        // strip commas, keep the dot
+        format!("{}{}", &mantissa[..sign_len], body.replace(',', ""))
+    } else if body.contains('.') {
+        // European: dot = thousands, comma = decimal
+        let (head, tail) = body.rsplit_once(',').unwrap_or((body, ""));
+        format!("{}{}.{}", &mantissa[..sign_len], head.replace('.', "").replace(',', ""), tail.replace('.', "").replace(',', ""))
+    } else {
+        // lone decimal comma(s): `12,50` → `12.50`, `1,5` → `1.5`
+        let (head, tail) = body.split_once(',').unwrap_or((body, ""));
+        format!("{}{}.{}", &mantissa[..sign_len], head, tail.replace(',', ""))
+    };
+    let cleaned = cleaned.chars().filter(|c| *c != ' ').collect::<String>();
+    Some(format!("{cleaned}{exponent}"))
+}
+
 /// Exact integer parse: parses digit strings directly as i64 without going
 /// through f64, so values like 9007199254740993 keep full precision.
 /// Returns None when the value is not an integer or overflows i64.
 fn parse_integer_exact(t: &str) -> Option<i64> {
-    let cleaned: String = t.trim().chars().filter(|c| *c != ',' && *c != '\u{a0}').collect();
-    if cleaned.is_empty() {
-        return None;
-    }
+    let cleaned = normalise_number_text(t)?;
     // Reject decimal/exponent forms — those are not integers even if f64-round.
     if cleaned.contains(['.', 'e', 'E']) {
         return None;
@@ -129,7 +186,7 @@ fn parse_integer_exact(t: &str) -> Option<i64> {
 /// True when the integer text is within i64 range but cannot be represented
 /// exactly (used to decide TEXT demotion instead of silent corruption).
 fn integer_overflows_i64(t: &str) -> bool {
-    let cleaned: String = t.trim().chars().filter(|c| *c != ',' && *c != '\u{a0}').collect();
+    let Some(cleaned) = normalise_number_text(t) else { return false };
     if cleaned.is_empty() || cleaned.contains(['.', 'e', 'E']) {
         return false;
     }
@@ -272,17 +329,43 @@ pub fn sniff_and_decode(bytes: &[u8]) -> (String, &'static str) {
     }
 }
 
-/// Splits a decoded CSV into rows with quote handling.
+/// Splits a decoded delimited text file into rows with quote handling.
+///
+/// The delimiter is chosen per file: `.tsv` forces a tab; otherwise the
+/// first non-empty line decides between `,` `\t` `;` by which yields the most
+/// fields (ties go to the comma). This is what makes European / Chinese-
+/// locale Excel exports (`分隔符 = ;`) and "tab saved as .csv" files work
+/// without the user having to rename or re-save anything.
 pub fn split_csv_rows(text: &str) -> Vec<Vec<String>> {
+    let delimiter = sniff_delimiter(text);
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .trim(csv::Trim::All)
+        .delimiter(delimiter)
         .from_reader(text.as_bytes());
     rdr.records()
         .filter_map(|r| r.ok())
         .map(|r| r.iter().map(|c| c.to_string()).collect())
         .collect()
+}
+
+/// Picks `,` `\t` or `;` from the first few non-empty lines by field count.
+pub fn sniff_delimiter(text: &str) -> u8 {
+    let mut best = (b',', 1usize);
+    for line in text.lines().filter(|l| !l.trim().is_empty()).take(8) {
+        for cand in [b',', b'\t', b';'] {
+            let n = line.matches(cand as char).count() + 1;
+            if n > best.1 {
+                best = (cand, n);
+            }
+        }
+        // A clear winner on the first line is enough.
+        if best.1 > 1 {
+            break;
+        }
+    }
+    best.0
 }
 
 /// `header_row_1based` is 1-based (1 = first row is the header). Rows above it
@@ -361,12 +444,19 @@ fn parse_sheet_body(body: Vec<Vec<String>>, header_mode: usize, skipped: usize, 
     }
 }
 
-/// Legacy auto-detect entry: skip empty leading rows, first non-empty row is
-/// the header.
+/// Auto-detect entry: skip empty leading rows and title/banner rows (a row
+/// with exactly one non-empty cell while a later row has several — "2024年
+/// 销售汇总", "制表人：…", blank line, then the real header). The first row
+/// with ≥ 2 non-empty cells is the header. A single-column file still works:
+/// if NO row ever has ≥ 2 cells, the first non-empty row is the header.
 pub fn parse_sheet(mut raw_rows: Vec<Vec<String>>, source_name: &str) -> SheetData {
+    let non_empty = |r: &[String]| r.iter().filter(|c| !c.trim().is_empty()).count();
+    let any_wide = raw_rows.iter().any(|r| non_empty(r) >= 2);
     let mut skipped = 0;
     while let Some(first) = raw_rows.first() {
-        if first.iter().all(|c| c.trim().is_empty()) {
+        let n = non_empty(first);
+        let is_banner = any_wide && n == 1 && raw_rows[1..].iter().any(|r| non_empty(r) >= 2);
+        if n == 0 || is_banner {
             raw_rows.remove(0);
             skipped += 1;
         } else {
@@ -441,6 +531,7 @@ pub fn parse_workbook(bytes: &[u8], _source_name: &str) -> Result<Vec<SheetData>
     let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
         .map_err(|e| format!("无法读取表格文件: {e}"))?;
     let hidden_names = hidden_sheet_names(bytes);
+    let is_1904 = workbook_is_1904(bytes);
     let mut sheets = Vec::new();
     for (name, range) in workbook.worksheets() {
         if range.height() == 0 && range.width() == 0 {
@@ -448,27 +539,7 @@ pub fn parse_workbook(bytes: &[u8], _source_name: &str) -> Result<Vec<SheetData>
         }
         let raw: Vec<Vec<String>> = range
             .rows()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| match cell {
-                        calamine::Data::Int(i) => i.to_string(),
-                        calamine::Data::Float(f) => {
-                            // Trim float noise: 3.0 stays "3", 3.14 keeps precision.
-                            if f.fract() == 0.0 && f.abs() < 1e15 {
-                                format!("{}", *f as i64)
-                            } else {
-                                format!("{f}")
-                            }
-                        }
-                        calamine::Data::DateTime(dt) => dt.to_string(),
-                        calamine::Data::DateTimeIso(s) => s.clone(),
-                        calamine::Data::DurationIso(s) => s.clone(),
-                        calamine::Data::String(s) => s.trim().to_string(),
-                        calamine::Data::Bool(b) => b.to_string(),
-                        other => other.to_string().trim().to_string(),
-                    })
-                    .collect()
-            })
+            .map(|row| row.iter().map(|c| cell_to_text(c, is_1904)).collect())
             .collect();
         let mut sheet = parse_sheet(raw, &name);
         sheet.hidden = hidden_names.contains(&name);
@@ -480,6 +551,96 @@ pub fn parse_workbook(bytes: &[u8], _source_name: &str) -> Result<Vec<SheetData>
         return Err("工作簿中没有包含数据的工作表".to_string());
     }
     Ok(sheets)
+}
+
+/// Renders one spreadsheet cell as the text the rest of the pipeline works
+/// with. Dates are the subtle part: calamine's `ExcelDateTime` Display (with
+/// the `dates` feature off) prints the raw serial number — 2024-03-01 would
+/// become "45352" and be inferred as a number. Convert the serial to ISO
+/// ourselves instead: pure date → `YYYY-MM-DD`, date+time →
+/// `YYYY-MM-DD HH:MM:SS`, which the DATE inference and SQLite ordering both
+/// expect.
+fn cell_to_text(cell: &calamine::Data, is_1904: bool) -> String {
+    match cell {
+        calamine::Data::Int(i) => i.to_string(),
+        calamine::Data::Float(f) => {
+            // Trim float noise: 3.0 stays "3", 3.14 keeps precision.
+            if f.fract() == 0.0 && f.abs() < 1e15 {
+                format!("{}", *f as i64)
+            } else {
+                format!("{f}")
+            }
+        }
+        calamine::Data::DateTime(dt) => excel_serial_to_iso(dt.as_f64(), is_1904),
+        calamine::Data::DateTimeIso(x) => x.clone(),
+        calamine::Data::DurationIso(x) => x.clone(),
+        calamine::Data::String(x) => x.trim().to_string(),
+        calamine::Data::Bool(b) => b.to_string(),
+        other => other.to_string().trim().to_string(),
+    }
+}
+
+/// Excel serial date (days since 1899-12-30 in the 1900 system, or since
+/// 1904-01-01 in the 1904 system) → ISO text. The 1899-12-30 epoch already
+/// accounts for Excel's phantom 1900-02-29 for every date after 1900-03-01;
+/// dates in Jan–Feb 1900 are off by one, which no spreadsheet in practical
+/// use has. 1904-workbook serials are shifted by the 1462 days between the
+/// two epochs.
+pub fn excel_serial_to_iso(serial: f64, is_1904: bool) -> String {
+    if !serial.is_finite() || serial < 0.0 || serial > 3_000_000.0 {
+        // Not a plausible date serial (corrupt cell or absurd value): keep the
+        // number rather than inventing a year-8000 date.
+        return format!("{serial}");
+    }
+    let days = serial.floor() as i64 + if is_1904 { 1462 } else { 0 };
+    let secs = (((serial - serial.floor()) * 86_400.0).round() as i64).clamp(0, 86_399);
+    let (y, m, d) = civil_from_days(days);
+    if secs == 0 {
+        format!("{y:04}-{m:02}-{d:02}")
+    } else {
+        format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
+/// Days since the Excel 1899-12-30 epoch → (year, month, day).
+/// Howard Hinnant's civil-from-days algorithm; 1899-12-30 is day -25569
+/// relative to the Unix epoch.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z - 25569; // Excel 1899-12-30 epoch → Unix 1970-01-01
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// True when the workbook uses the 1904 date system
+/// (`<workbookPr date1904="1"/>` in `xl/workbook.xml`); rare, but Mac Excel
+/// default for years and silently wrong by 4 years if ignored.
+fn workbook_is_1904(bytes: &[u8]) -> bool {
+    use std::io::Read;
+    let mut zip = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+        Ok(z) => z,
+        Err(_) => return false,
+    };
+    let mut xml = match zip.by_name("xl/workbook.xml") {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = String::new();
+    if xml.read_to_string(&mut buf).is_err() {
+        return false;
+    }
+    // Only the <workbookPr …/> element matters; date1904="1" / "true".
+    buf.split('<').find(|s| s.starts_with("workbookPr")).is_some_and(|tag| {
+        tag.split_once('>').map(|(t, _)| t).unwrap_or(tag).contains("date1904=\"1\"")
+            || tag.contains("date1904=\"true\"")
+    })
 }
 
 
@@ -590,6 +751,7 @@ pub fn reparse_with_headers(
     let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
         .map_err(|e| format!("无法读取表格文件: {e}"))?;
     let hidden_names = hidden_sheet_names(bytes);
+    let is_1904 = workbook_is_1904(bytes);
     let mut sheets = Vec::new();
     for (idx, (name, range)) in workbook.worksheets().into_iter().enumerate() {
         if range.height() == 0 && range.width() == 0 {
@@ -597,26 +759,7 @@ pub fn reparse_with_headers(
         }
         let raw: Vec<Vec<String>> = range
             .rows()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| match cell {
-                        calamine::Data::Int(i) => i.to_string(),
-                        calamine::Data::Float(f) => {
-                            if f.fract() == 0.0 && f.abs() < 1e15 {
-                                format!("{}", *f as i64)
-                            } else {
-                                format!("{f}")
-                            }
-                        }
-                        calamine::Data::DateTime(dt) => dt.to_string(),
-                        calamine::Data::DateTimeIso(x) => x.clone(),
-                        calamine::Data::DurationIso(x) => x.clone(),
-                        calamine::Data::String(x) => x.trim().to_string(),
-                        calamine::Data::Bool(b) => b.to_string(),
-                        other => other.to_string().trim().to_string(),
-                    })
-                    .collect()
-            })
+            .map(|row| row.iter().map(|c| cell_to_text(c, is_1904)).collect())
             .collect();
         let hr = header_rows.get(idx).copied().unwrap_or(1);
         let mut sheet = parse_sheet_with_header(raw, &name, hr);
@@ -675,6 +818,29 @@ mod tests {
     }
 
     #[test]
+    fn decimal_comma_vs_thousands_comma() {
+        // thousands style: groups of exactly three
+        assert_eq!(parse_number_loose("1,234"), Some(1234.0));
+        assert_eq!(parse_number_loose("1,234,567.50"), Some(1_234_567.50));
+        assert_eq!(parse_number_loose("-1,234"), Some(-1234.0));
+        // decimal comma (not 3-digit groups) — the 100× bug
+        assert_eq!(parse_number_loose("12,50"), Some(12.5));
+        assert_eq!(parse_number_loose("0,5"), Some(0.5));
+        assert_eq!(parse_number_loose("7,99"), Some(7.99));
+        // European "1.234,56" (dot thousands, comma decimal)
+        assert_eq!(parse_number_loose("1.234,56"), Some(1234.56));
+        // plain and exponent forms unchanged
+        assert_eq!(parse_number_loose("3.14"), Some(3.14));
+        assert_eq!(parse_number_loose("1e3"), Some(1000.0));
+        assert_eq!(parse_number_loose("1,5e3"), Some(1500.0));
+        assert_eq!(parse_number_loose("abc"), None);
+        assert_eq!(parse_number_loose(""), None);
+        // integers with thousands still parse exactly
+        assert_eq!(parse_integer_exact("1,234,567"), Some(1_234_567));
+        assert_eq!(parse_integer_exact("12,50"), None);
+    }
+
+    #[test]
     fn infers_dates() {
         assert_eq!(col_type_from_cells(["2024-01-02", "2024-03-04"].iter().map(|s| s.to_string())), ColType::Date);
         assert_eq!(col_type_from_cells(["2024/1/2", "2024/3/4"].iter().map(|s| s.to_string())), ColType::Date);
@@ -719,6 +885,60 @@ mod tests {
     fn parses_csv_rows_with_quotes() {
         let rows = split_csv_rows("a,b\n\"x,1\",2\n");
         assert_eq!(rows, vec![vec!["a", "b"], vec!["x,1", "2"]]);
+    }
+
+    #[test]
+    fn sniffs_delimiter() {
+        assert_eq!(sniff_delimiter("a,b,c\n1,2,3\n"), b',');
+        assert_eq!(sniff_delimiter("name;price;qty\nWidget;12,50;3\n"), b';');
+        assert_eq!(sniff_delimiter("a\tb\tc\n1\t2\t3\n"), b'\t');
+        // a line with no delimiters at all defaults to comma
+        assert_eq!(sniff_delimiter("just one cell\n"), b',');
+        // comma wins ties (it is checked first and only strictly-greater wins)
+        assert_eq!(sniff_delimiter("a;b,c\n"), b',');
+    }
+
+    #[test]
+    fn splits_tsv_and_semicolon_csv() {
+        let tsv = split_csv_rows("a\tb\n1\t2\n");
+        assert_eq!(tsv, vec![vec!["a", "b"], vec!["1", "2"]]);
+        let semi = split_csv_rows("name;price\nWidget;12,50\n");
+        assert_eq!(semi, vec![vec!["name", "price"], vec!["Widget", "12,50"]]);
+    }
+
+    #[test]
+    fn phone_numbers_infer_text() {
+        assert_eq!(col_type_from_cells(["13800000001", "13800000002"].iter().map(|s| s.to_string())), ColType::Text);
+        // ordinary quantities (≤ 6 digits) still become INTEGER
+        assert_eq!(col_type_from_cells(["123456", "654321"].iter().map(|s| s.to_string())), ColType::Integer);
+        // and so do 7+ digit numbers that carry thousands separators
+        assert_eq!(col_type_from_cells(["12,345,678", "1,234,567"].iter().map(|s| s.to_string())), ColType::Integer);
+    }
+
+    #[test]
+    fn excel_serials_render_as_iso_dates() {
+        // Verified against Excel: 45352 = 2024-03-01, 45352.395833 ≈ 09:30:00
+        assert_eq!(excel_serial_to_iso(45352.0, false), "2024-03-01");
+        assert_eq!(excel_serial_to_iso(45352.3958333333, false), "2024-03-01 09:30:00");
+        assert_eq!(excel_serial_to_iso(0.0, false), "1899-12-30"); // the epoch itself
+        assert_eq!(excel_serial_to_iso(45292.0, false), "2024-01-01");
+        assert_eq!(excel_serial_to_iso(45657.0, false), "2024-12-31");
+        // Serials in Jan/Feb 1900 land one day late because Excel invents a
+        // 1900-02-29; serial 61 (Excel's "1900-03-01") is where the two
+        // calendars re-align. Nobody imports 1900 data, so this is accepted.
+        assert_eq!(excel_serial_to_iso(61.0, false), "1900-03-01");
+        // 1904 system: 0 = 1904-01-01
+        assert_eq!(excel_serial_to_iso(0.0, true), "1904-01-01");
+        // implausible serials are kept as numbers
+        assert_eq!(excel_serial_to_iso(-5.0, false), "-5");
+        assert_eq!(excel_serial_to_iso(f64::NAN, false), "NaN");
+    }
+
+    #[test]
+    fn rendered_dates_infer_as_date_column() {
+        // The regression: a date cell used to arrive as "45352" → REAL.
+        let cells = [excel_serial_to_iso(45352.0, false), excel_serial_to_iso(45353.5, false)];
+        assert_eq!(col_type_from_cells(cells.iter().map(|s| s.to_string())), ColType::Date);
     }
 
     #[test]
@@ -771,6 +991,36 @@ mod tests {
         assert_eq!(sheet.skipped_header_rows, 1);
         assert_eq!(sheet.headers, vec!["h1", "h2"]);
         assert_eq!(sheet.rows.len(), 1);
+    }
+
+    #[test]
+    fn skips_title_banner_rows_before_header() {
+        // "title" / "subtitle" / blank / header / data — header on row 4.
+        let sheet = parse_sheet(
+            vec![
+                vec!["2024年销售汇总".into(), String::new(), String::new()],
+                vec!["制表人：采购部".into(), String::new(), String::new()],
+                vec![String::new(), String::new(), String::new()],
+                vec!["单据编号".into(), "供应商".into(), "金额".into()],
+                vec!["0001".into(), "华东物资".into(), "15200.75".into()],
+            ],
+            "S",
+        );
+        assert_eq!(sheet.skipped_header_rows, 3);
+        assert_eq!(sheet.headers, vec!["单据编号", "供应商", "金额"]);
+        assert_eq!(sheet.rows.len(), 1);
+    }
+
+    #[test]
+    fn single_column_file_is_not_treated_as_banner() {
+        // Every row has exactly one cell: the first one IS the header.
+        let sheet = parse_sheet(
+            vec![vec!["名称".into()], vec!["甲".into()], vec!["乙".into()]],
+            "S",
+        );
+        assert_eq!(sheet.skipped_header_rows, 0);
+        assert_eq!(sheet.headers, vec!["名称"]);
+        assert_eq!(sheet.rows.len(), 2);
     }
 
     #[test]

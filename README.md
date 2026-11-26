@@ -26,15 +26,25 @@ AI 会自动写 SQL、执行并给出答案——不需要懂任何数据库知�
 ### 导入：表格 → 数据库
 
 1. 打开 DBX → 插件中心 → 已安装 → ExcelX → 打开工作台
-2. 选择一个表格文件（多 sheet 的 Excel，每个 sheet 成为一张表；可以勾选只转换其中几个）
-3. 检查预览：每列的类型（文本 / 整数 / 小数 / 日期）、表头所在行、是否需要主键（默认无主键；设置主键时会先校验值是否唯一）
+2. 选择一个表格文件（多 sheet 的 Excel，每个 sheet 成为一张表；可以勾选只转换其中几个）。四种方式任选：
+   - 「选择文件」：系统文件对话框
+   - 「备用选择器」：DBX 自带的文件选择器（系统对话框被策略拦截 / 启动失败时自动切换）
+   - 把文件**拖进**工作台
+   - 把文件完整路径**粘贴**到输入框（Explorer 的「复制文件地址」可直接用，带引号也行）
+3. 检查预览：每列的类型（文本 / 整数 / 小数 / 日期）、表头所在行（可选 0–20 行，第一行是标题时会提示改表头）、是否需要主键（默认无主键；设置主键时会先校验值是否唯一）
 4. 点击「转换为数据库」
 
 生成的 `.db` 文件与原文件在同一文件夹，并自动加入 DBX 连接列表（带 `ExcelX ` 前缀和茶绿色标识），自动打开。之后就像使用任何数据库一样使用它：写 SQL、编辑数据、或者直接问 AI 助手。
 
+> 通过拖入 / 备用选择器导入的文件，`.db` 放在「文档\ExcelX」文件夹（宿主不向插件提供原文件路径）。
+
 ### 导出：数据库 → 表格
 
-在工作台切到「导出表格」页，选择 ExcelX 转换过的数据库（或本地任意 `.db` 文件），勾选要导出的表，点击导出——多张表会成为一个多 sheet 的 Excel 文件。修改过数据后再导出，就完成了「表格 → 数据库 → 表格」的完整回路。
+在工作台切到「导出表格」页，选择 ExcelX 转换过的数据库（或本地任意 `.db` 文件），勾选要导出的表：
+- **导出 XLSX**：多张表成为一个多 sheet 的 Excel 文件（单表上限 1,048,576 行）
+- **导出 CSV**：每张表一个 `.csv`（UTF-8 带 BOM，Excel 双击直接打开中文不乱码），没有行数上限——超过 xlsx 上限的大表用它
+
+修改过数据后再导出，就完成了「表格 → 数据库 → 表格」的完整回路。
 
 ## 特性
 
@@ -42,13 +52,15 @@ AI 会自动写 SQL、执行并给出答案——不需要懂任何数据库知�
 - **智能类型推断**：编号、手机号等有前导零的列自动保持文本（`001` 不会变成 `1`）；日期统一为可排序的 ISO 格式
 - **列画像**：每列的有值率、不同取值数、样本值直接显示在表头下方
 - **主键可选**：默认无主键；设置时会先校验唯一性，重复值会明确列出
+- **文件选择不卡死**：系统对话框 / DBX 自带选择器 / 拖入 / 粘贴路径四条路，总有一条能用
+- **CSV 导出**：大表不受 xlsx 1,048,576 行上限限制
 - **纯本地**：转换全部在本机完成，数据不出电脑
 - 生成的连接是标准 SQLite 连接——DBX 的全部能力（SQL 编辑器、数据编辑、AI 助手）开箱即用
 
 ## 平台支持
 
 - **Windows x64** — 正式支持
-- **macOS (Apple Silicon / Intel)** — 正式支持：文件选择使用系统 osascript，DBX 数据目录遵循 `~/Library/Application Support`
+- **macOS (Apple Silicon / Intel)** — 正式支持：文件选择使用系统 osascript（CSV / XLSX / XLS 均可选择），DBX 数据目录遵循 `~/Library/Application Support`
 
 Linux 暂不支持。
 
@@ -62,12 +74,11 @@ Linux 暂不支持。
 ## 构建
 
 ```bash
-# 打包（需要 DBX_PLUGIN_SDK_ROOT 指向 plugin-cli 自带的 SDK）
-export DBX_PLUGIN_SDK_ROOT=<path-to-plugin-cli>/sdk-root
-npx @dbx-app/plugin-cli package .
+# 打包（npm 版 plugin-cli 自带 SDK，不需要 DBX_PLUGIN_SDK_ROOT）
+npx @dbx-app/plugin-cli@0.1.10 package .
 ```
 
-发布由 GitHub Actions 在 Release 发布时自动构建五平台包（见 `.github/workflows/plugin-release.yml`）。
+发布由 GitHub Actions 在 Release 发布时自动构建三平台包（见 `.github/workflows/plugin-release.yml`）。后端测试在 Windows + macOS（arm64 / Intel）上运行（`.github/workflows/backend-tests.yml`）。
 
 ## 许可
 
