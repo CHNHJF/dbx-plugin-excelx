@@ -1160,7 +1160,8 @@ mod tests {
         assert!(!is_staged_source(regular.to_str().unwrap()));
         assert_eq!(default_output_candidate(regular.to_str().unwrap()), std::env::temp_dir().join("data").join("a.db"));
         // a stem that merely contains a dash is not a staged size suffix
-        assert_eq!(staged_display_stem("C:\\x\\sales-2024-q1.xlsx"), "sales-2024-q1");
+        let dashed = std::env::temp_dir().join("sales-2024-q1.xlsx");
+        assert_eq!(staged_display_stem(dashed.to_str().unwrap()), "sales-2024-q1");
     }
 
     #[test]
