@@ -71,6 +71,21 @@ Linux 暂不支持。
 
 > 升级后请关闭旧的 ExcelX 工作台标签页再重新打开。
 
+## 疑难解答
+
+### 卸载 / 升级时提示「插件正在使用中」，或操作没反应
+
+DBX 卸载插件前要求插件完全停止。ExcelX 是带后台进程（sidecar）的插件，遇到下面几种情况会卸不掉：
+
+1. **ExcelX 工作台标签页还开着**（包括被拖出来的独立窗口）——先把这个标签页关掉。
+2. **DBX 退出后 sidecar 没被回收**——打开任务管理器，结束仍在运行的 `dbx-plugin-excelx.exe`。
+3. **`plugins\.install.lock` 是上次异常退出留下的陈旧锁**——删掉这个 0 字节文件：
+   - Windows：`%APPDATA%\com.dbx.app\plugins\.install.lock`
+   - macOS：`~/Library/Application Support/com.dbx.app/plugins/.install.lock`
+4. 上面都做完仍卸不掉：**完全退出 DBX（托盘图标右键退出，不是只关窗口）**，重开后再卸载。仍不行就手动删除插件目录 `plugins\io.github.chnhjf.excelx`——它的全部注册信息（含 `activations\`）都在这个目录里，删掉即等于卸载。
+
+> 根因是 DBX 退出时未回收插件子进程，且下次启动会自动恢复上次打开的插件标签页、把 sidecar 重新拉起来。所以最省事的顺序是：**先关 ExcelX 标签页，再退出 DBX，再重开卸载**。
+
 ## 构建
 
 ```bash
